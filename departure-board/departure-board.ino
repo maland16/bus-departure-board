@@ -1,19 +1,32 @@
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WiFiGeneric.h>
+#include <WiFiMulti.h>
+
 #define ENABLE_GxEPD2_GFX 0
 
 #include <GxEPD2_BW.h>
 #include "GxEPD2_display_selection_new_style.h"
 
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WiFiClientSecure.h>
+
 #include <Fonts/FreeMonoBold9pt7b.h>
 #include <Fonts/FreeMonoBold12pt7b.h>
 
+#include "credentials.h"
+
+#define SERIAL_BAUD (115200)
+#define WIFI_CONNECT_TIMEOUT (60) // Units are 500ms
 
 void setup() {
   // put your setup code here, to run once:
-  Serial.begin(115200);
+  Serial.begin(SERIAL_BAUD);
   Serial.println();
   Serial.println("setup");
   
-  display.init(115200, true, 2, false); // Initialize display
+  display.init(SERIAL_BAUD, true, 2, false); // Initialize display
 
   helloWorld();
 
@@ -27,6 +40,35 @@ void setup() {
   while (display.nextPage());
 
   display.powerOff();
+}
+
+void initWifi()
+{
+  WiFi.mode(WIFI_STA);
+  Serial.print("Connecting to ");
+  Serial.println(PRIMARY_WIFI_SSID);
+  WiFi.begin(PRIMARY_WIFI_SSID, PRIMARY_WIFI_PASSWOED);
+
+  int ConnectTimeout = WIFI_CONNECT_TIMEOUT;
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+    Serial.print(WiFi.status());
+    if (--ConnectTimeout <= 0)
+    {
+      Serial.println();
+      Serial.println("WiFi connect timeout");
+      return;
+    }
+  }
+  Serial.println();
+  Serial.println("WiFi connected");
+
+  // Print the IP address
+  Serial.println(WiFi.localIP());
+
+  setClock();
 }
 
 void helloWorld()
@@ -78,4 +120,23 @@ void helloWorld()
 void loop() {
   // put your main code here, to run repeatedly:
 
+}
+
+void setClock()
+{
+  configTime(3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+
+  Serial.print("Waiting for NTP time sync: ");
+  time_t now = time(nullptr);
+  while (now < 8 * 3600 * 2)
+  {
+    delay(500);
+    Serial.print(".");
+    now = time(nullptr);
+  }
+  Serial.println("");
+  struct tm timeinfo;
+  gmtime_r(&now, &timeinfo);
+  Serial.print("Current time: ");
+  Serial.print(asctime(&timeinfo));
 }
