@@ -1,15 +1,14 @@
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <WiFiGeneric.h>
-#include <WiFiMulti.h>
-
 #define ENABLE_GxEPD2_GFX 0
+
+#include <ESP32Time.h>
 
 #include <GxEPD2_BW.h>
 #include "GxEPD2_display_selection_new_style.h"
 
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <WiFiGeneric.h>
+#include <WiFiMulti.h>
 #include <WiFiClientSecure.h>
 
 #include <Fonts/FreeMonoBold9pt7b.h>
@@ -18,7 +17,9 @@
 #include "credentials.h"
 
 #define SERIAL_BAUD (115200)
-#define WIFI_CONNECT_TIMEOUT (60) // Units are 500ms
+
+WiFiMulti wifiMulti;
+ESP32Time rtc(0);
 
 void setup() {
   // put your setup code here, to run once:
@@ -28,8 +29,16 @@ void setup() {
   
   display.init(SERIAL_BAUD, true, 2, false); // Initialize display
 
-  helloWorld();
+  initWifi();
 
+  initClock();
+  updateRTCFromNPT();
+  struct tm timeinfo = rtc.getTimeStruct();
+  Serial.print("Current time: ");
+  Serial.println(asctime(&timeinfo));
+
+  helloWorld();
+  
   delay(3000);
   
   display.firstPage();
@@ -44,31 +53,69 @@ void setup() {
 
 void initWifi()
 {
-  WiFi.mode(WIFI_STA);
-  Serial.print("Connecting to ");
-  Serial.println(PRIMARY_WIFI_SSID);
-  WiFi.begin(PRIMARY_WIFI_SSID, PRIMARY_WIFI_PASSWOED);
+  wifiMulti.addAP(PRIMARY_WIFI_SSID, PRIMARY_WIFI_PASSWORD);
+  wifiMulti.addAP("ssid_from_AP_2", "your_password_for_AP_2");
 
-  int ConnectTimeout = WIFI_CONNECT_TIMEOUT;
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    delay(500);
-    Serial.print(".");
-    Serial.print(WiFi.status());
-    if (--ConnectTimeout <= 0)
+  Serial.println("Initializing Wifi...");
+
+  refreshWifiConnection();
+}
+
+void refreshWifiConnection()
+{
+  if (WiFi.status() != WL_CONNECTED){
+    // .run() connects to the strongest wifi on the list
+    if (wifiMulti.run() == WL_CONNECTED)
     {
-      Serial.println();
-      Serial.println("WiFi connect timeout");
-      return;
+      Serial.print("Wifi Status: ");
+      Serial.println(WiFi.status());
+      Serial.print("Connected to: ");
+      Serial.println(WiFi.SSID());
+      Serial.print("RSSI: ");
+      Serial.println(WiFi.RSSI());
+      Serial.print("IP address: ");
+      Serial.println(WiFi.localIP());
+    } else {
+      Serial.print("Wifi Status: ");
+      Serial.println(WiFi.status());
+      Serial.println("Failed to connect to wifi!");
     }
   }
-  Serial.println();
-  Serial.println("WiFi connected");
+}
 
-  // Print the IP address
-  Serial.println(WiFi.localIP());
+void initClock()
+{
+  configTzTime("EST5EDT,M3.2.0,M11.1.0", "pool.ntp.org", "time.nist.gov");
 
-  setClock();
+  Serial.print("Waiting for NTP time sync");
+  
+  unsigned long time = 0;
+  uint8_t timeout = 10;
+
+  do {
+    Serial.print(".");
+    time = getEpochTimeFromNPT();
+    timeout--;
+    delay(100);
+  } while(time == 0 && timeout > 0);
+  Serial.println("done!");
+}
+
+unsigned long getEpochTimeFromNPT()
+{
+  time_t now;
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return(0);
+  }
+  time(&now);
+  return now;
+}
+
+void updateRTCFromNPT()
+{
+  Serial.println("Updated RTC from Internet");
+  rtc.setTime(getEpochTimeFromNPT());
 }
 
 void helloWorld()
@@ -120,23 +167,4 @@ void helloWorld()
 void loop() {
   // put your main code here, to run repeatedly:
 
-}
-
-void setClock()
-{
-  configTime(3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-
-  Serial.print("Waiting for NTP time sync: ");
-  time_t now = time(nullptr);
-  while (now < 8 * 3600 * 2)
-  {
-    delay(500);
-    Serial.print(".");
-    now = time(nullptr);
-  }
-  Serial.println("");
-  struct tm timeinfo;
-  gmtime_r(&now, &timeinfo);
-  Serial.print("Current time: ");
-  Serial.print(asctime(&timeinfo));
 }
