@@ -1,3 +1,6 @@
 venv/*
 departure-board/credentials.h
 bmpGen.log
+temp.bmp
+temp.png
+
