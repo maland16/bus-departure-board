@@ -1,0 +1,16 @@
+@startuml
+
+state Running : regularly fetching arrival data\n and updating display 
+state Disconnected : - unable to communicate with wifi OR server\n- will keep attempting to reconnect. 
+state Sleeping : Metro has gone to sleep\nfor the night
+state LowPower : disable wifi, periodically wait\nfor battery to charge
+
+[*] --> Running
+Running --> Disconnected : Unable to fetch data
+Disconnected --> Running : Re-connected
+Running --> Sleeping : At ~11PM
+Sleeping --> Running : At 5AM
+Running --> LowPower : Low battery SOC
+Sleeping --> LowPower : Low battery SOC
+Disconnected --> LowPower : Low battery SOC
+@enduml
