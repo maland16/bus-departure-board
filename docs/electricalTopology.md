@@ -15,7 +15,7 @@ graph TD;
 
 ### Solar Power
 
-10W was chosen as a conservative target for powering through long stretches of overcast short winter days
+10W was chosen as a conservative target for powering through long stretches of cold, overcast, short winter days.
 
 ### Battery Storage
 LiFePo4 was chosen due to its relatively high power density, safety, and availability. Here are some other options I explored and their pros/cons as relevant to this application:
