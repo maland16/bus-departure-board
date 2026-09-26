@@ -109,3 +109,32 @@ void initTaskWatchdog() {
   esp_task_wdt_add(NULL); // subscribe the calling task
 }
 */
+
+void printResetReason( esp_reset_reason_t resetReason ) {
+    switch (resetReason) {
+        case ESP_RST_POWERON:   
+            Serial.println("Reset due to power-on event");
+            break;
+        case ESP_RST_SW:        
+            Serial.println("Software reset via esp_restart()");
+            break;
+        case ESP_RST_PANIC: 
+            Serial.println("Software reset due to exception/panic");
+            break;
+        case ESP_RST_INT_WDT: 
+            Serial.println("Interrupt watchdog reset");
+            break;
+        case ESP_RST_TASK_WDT:  
+            Serial.println("Task watchdog reset");
+            break;
+        case ESP_RST_DEEPSLEEP:
+            Serial.println("Reset after exiting deep sleep");
+            break;
+        case ESP_RST_BROWNOUT: 
+            Serial.println("Brownout reset");
+            break;
+        default:
+            Serial.println("Reset reason other or unknown");
+            break;
+    }
+}

@@ -5,9 +5,11 @@
 #include <ESP32Time.h>
 
 extern ESP32Time rtc;
+extern bool rtcValid;
 
 void initClock();
 unsigned long getEpochTimeFromNPT();
 void updateRTCFromNPT();
+bool getRTCValid();
 
 #endif // RTC_DRIVER_H

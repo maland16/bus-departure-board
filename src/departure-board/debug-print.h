@@ -1,6 +1,8 @@
 #ifndef DEBUG_PRINT_H
 #define DEBUG_PRINT_H
 
+#define DEBUG_MODE
+
 #ifdef DEBUG_MODE
 #define DEBUG_PRINTLN(X) \
     Serial.print("[DEBUG "); \
