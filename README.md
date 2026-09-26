@@ -1,4 +1,4 @@
-# Bus Departure Board
+# GPMetro Bus Stop Departure Board
 
 ![Prototype departure board design](docs/Assembly%201.png)
 The goal of this project is to create a relatively low cost standalone live departure board for Portland Metro bus stops. This design uses an ESP32, e-ink display, and large LiFePo4 cell recharged via solar.

@@ -3,22 +3,24 @@
 #include "debug-print.h"
 #include "rtc-driver.h"
 
+#define WIFI_CLIENT_TIMEOUT_SEC (5)
+
 WiFiClientSecure client;
 WiFiMulti wifiMulti;
-
-void initWifiClient()
-{
-  if (web_cert) client.setCACert(web_cert);
-}
 
 void initWifi()
 {
   wifiMulti.addAP(PRIMARY_WIFI_SSID, PRIMARY_WIFI_PASSWORD);
-  wifiMulti.addAP("ssid_from_AP_2", "your_password_for_AP_2");
+  wifiMulti.addAP(SECONDARY_WIFI_SSID, SECONDARY_WIFI_PASSWORD);
+  wifiMulti.addAP(TERTIARY_WIFI_SSID, TERTIARY_WIFI_PASSWORD);
 
   DEBUG_PRINTLN("Initializing Wifi...");
 
   refreshWifiConnection();
+
+  client.setCACert(web_cert);
+
+  client.setTimeout(WIFI_CLIENT_TIMEOUT_SEC);
 }
 
 void refreshWifiConnection()

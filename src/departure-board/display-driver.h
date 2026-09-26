@@ -2,9 +2,8 @@
 #define DISPLAY_DRIVER_H
 
 #include <GxEPD2_BW.h>
-#include "GxEPD2_display_selection_new_style.h"
 
-void initDisplay();
+void initDisplayDriver(void);
 
 void helloWorld(void);
 
@@ -21,6 +20,6 @@ void clearScreenPowerOff(void);
 /**
  * @brief Grab the latest image
  */
-bool connectAndGetImage(void);
+bool drawBmpFromUrl(const char *url);
 
 #endif // DISPLAY_DRIVER_H

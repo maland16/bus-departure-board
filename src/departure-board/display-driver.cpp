@@ -1,7 +1,10 @@
 
 #include "display-driver.h"
 
+#include "GxEPD2_display_selection_new_style.h"
+
 #include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <ESP32Time.h>
 
 #include <Fonts/FreeMonoBold9pt7b.h>
@@ -14,75 +17,71 @@
 
 #define BITMAP_SIGNATURE (0x4D42) // "BM" in hex
 #define MAX_EXPECTED_HEADER_POSITION_BYTES (50)
+#define FETCH_IMAGE_TIMEOUT_MS (20000)
+#define FETCH_IMAGE_TIMEOUT_EXPIRED(X) (millis() - X > FETCH_IMAGE_TIMEOUT_MS)
+#define HTTP_GET_RETRIES (3)
 
-static const int httpPort  = 80;
-static const int httpsPort = 443;
-static const char* hostname   = "www.devinmalanaphy.com";
-static const char* path = "/wp-content/uploads/2026/01/temp.bmp";
+HTTPClient http;
+
+// ---- Fixed target dimensions (native GxEPD2_750_T7 resolution) ----
+static const uint16_t PANEL_WIDTH  = 800;
+static const uint16_t PANEL_HEIGHT = 480;
+
+static const size_t FRAMEBUFFER_ROW_BYTES = (PANEL_WIDTH + 7) / 8;                 // 100
+static const size_t FRAMEBUFFER_SIZE      = FRAMEBUFFER_ROW_BYTES * PANEL_HEIGHT;  // 48000
+
+// Worst case row size across supported bit depths (24bpp is the largest per row)
+static const size_t MAX_BMP_ROW_BYTES = ((uint32_t)PANEL_WIDTH * 24 + 31) / 32 * 4; // 2400
+
+// ---- Static buffers, reused across calls ----
+static uint8_t framebuffer[FRAMEBUFFER_SIZE];
+static uint8_t bmpRowBuf[MAX_BMP_ROW_BYTES];
+static bool blackTable[256]; // palette-index -> "is this black?" lookup for 1/8bpp BMPs
 
 static char timeTextBuffer[50];
 
-void initDisplay()
+void initDisplayDriver()
 {
     display.init(115200, true, 2, false); // Initialize display
+
+    // don't keep the TCP/TLS connection alive between calls - a reused
+    // connection that's gone stale (idle timeout, NAT/firewall drop) can
+    // hang indefinitely on write with no error and no timeout, since that
+    // happens below the level http.setTimeout() covers
+    http.setReuse(false);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // in case the file is served via a CDN/redirect
+    http.setTimeout(8000);
 }
 
-uint32_t read8n(WiFiClient& client, uint8_t* buffer, int32_t bytes)
-{
-  int32_t remain = bytes;
-  uint32_t start = millis();
-  while ((client.connected() || client.available()) && (remain > 0))
-  {
-    if (client.available())
-    {
-      int16_t v = client.read();
-      *buffer++ = uint8_t(v);
-      remain--;
+// ---- Blocking read of exactly `len` bytes from any Stream, with a stall timeout ----
+static bool readFully(Stream &s, uint8_t *dst, size_t len, uint32_t timeoutMs = 8000) {
+  size_t got = 0;
+  uint32_t lastProgress = millis();
+  while (got < len) {
+    int avail = s.available();
+    if (avail > 0) {
+      int n = s.readBytes(dst + got, len - got);
+      if (n > 0) {
+        got += n;
+        lastProgress = millis();
+        continue;
+      }
     }
-    else delay(1);
-    if (millis() - start > 2000) break; // don't hang forever
+    if (millis() - lastProgress > timeoutMs) return false; // stalled
+    delay(1);
   }
-  return bytes - remain;
+  return true;
 }
 
-uint16_t read16LEFromClient(WiFiClient& client)
-{
-  // BMP data is stored little-endian, same as Arduino.
-  uint16_t result;
-  ((uint8_t *)&result)[0] = client.read(); // LSB
-  ((uint8_t *)&result)[1] = client.read(); // MSB
-  return result;
-}
-
-uint32_t read32LEFromClient(WiFiClient& client)
-{
-  // BMP data is stored little-endian, same as Arduino.
-  uint32_t result;
-  ((uint8_t *)&result)[0] = client.read(); // LSB
-  ((uint8_t *)&result)[1] = client.read();
-  ((uint8_t *)&result)[2] = client.read();
-  ((uint8_t *)&result)[3] = client.read(); // MSB
-  return result;
-}
-
-/**
- * @brief Skips "bytes" bytes in the client connection. Returns number of bytes read
- */
-uint32_t skipBytes(WiFiClient& client, int32_t bytes)
-{
-  int32_t remain = bytes;
-  uint32_t start = millis();
-  while ((client.connected() || client.available()) && (remain > 0))
-  {
-    if (client.available())
-    {
-      client.read();
-      remain--;
-    }
-    else delay(1);
-    if (millis() - start > 2000) break; // don't hang forever
+// ---- Skip `count` bytes forward in the stream ----
+static bool skipBytes(Stream &s, uint32_t count) {
+  uint8_t buf[32];
+  while (count > 0) {
+    uint32_t chunk = count > sizeof(buf) ? sizeof(buf) : count;
+    if (!readFully(s, buf, chunk)) return false;
+    count -= chunk;
   }
-  return bytes - remain;
+  return true;
 }
 
 void helloWorld(void)
@@ -148,7 +147,6 @@ void addDateTimeToPageBuffer(void)
   display.setFont(&FreeSans18pt7b);
   display.setTextColor(GxEPD_BLACK);
   // Adafruit_GFX has a handy method getTextBounds() to determine the boundary box for a text for the actual font
-  int16_t tbx, tby; uint16_t tbw, tbh; 
   display.setFullWindow();
   display.firstPage();
   do
@@ -178,220 +176,221 @@ void clearScreenPowerOff(void) {
   display.powerOff();
 }
 
-bool connectAndGetImage(void)
-{
-  uint32_t startTime = millis();
-  if (!client.connected()) {
-    // Not connected, attempt reconnect
-    if (!client.connect(hostname, httpsPort)) {
-      Serial.println("ERROR: Failed to connect!");
+bool drawBmpFromUrl(const char *url) {
+  Serial.printf("stack high water mark (beginning of display loop): %u bytes free\n", uxTaskGetStackHighWaterMark(NULL));
+
+  client.setInsecure();
+
+  if (display.width() != PANEL_WIDTH || display.height() != PANEL_HEIGHT) {
+    Serial.printf("Display reports %dx%d, expected native %ux%u - check setRotation(0)\n",
+                  display.width(), display.height(), PANEL_WIDTH, PANEL_HEIGHT);
+    return false;
+  }
+
+  if (!http.begin(client, url)) {
+    Serial.println("http.begin() failed - malformed URL?");
+    return false;
+  } else {
+    Serial.printf("http.begin() succeeded: %s\n", url);
+  }
+
+  Serial.printf("free: %u, largest block: %u\n",
+  heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+  heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
+  if (!heap_caps_check_integrity_all(true)) {
+    Serial.println("HEAP CORRUPTED before http.GET()");
+  }
+
+  int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("HTTP GET failed: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
+    http.end();
+    return false;
+  } else {
+    Serial.printf("HTTP GET succeeded: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
+  }
+
+  if (!heap_caps_check_integrity_all(true)) {
+    Serial.println("HEAP CORRUPTED after http.GET()");
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+  if (!stream) {
+    Serial.println("No response stream available");
+    http.end();
+    return false;
+  } else {
+    Serial.println("Response stream available");
+  }
+
+  // ---- BMP file header (14 bytes) ----
+  uint8_t fileHeader[14];
+  if (!readFully(*stream, fileHeader, sizeof(fileHeader))) {
+    Serial.println("Failed to read BMP file header");
+    http.end();
+    return false;
+  }
+  if (fileHeader[0] != 'B' || fileHeader[1] != 'M') {
+    Serial.println("Not a BMP file (missing 'BM' signature)");
+    http.end();
+    return false;
+  }
+  uint32_t dataOffset = fileHeader[10] | (fileHeader[11] << 8) | (fileHeader[12] << 16) | ((uint32_t)fileHeader[13] << 24);
+
+  // ---- DIB header (assume standard 40-byte BITMAPINFOHEADER) ----
+  uint8_t dib[40];
+  if (!readFully(*stream, dib, sizeof(dib))) {
+    Serial.println("Failed to read DIB header");
+    http.end();
+    return false;
+  }
+  uint32_t dibSize      = dib[0]  | (dib[1]  << 8) | (dib[2]  << 16) | ((uint32_t)dib[3]  << 24);
+  int32_t  bmpWidth     = (int32_t)(dib[4]  | (dib[5]  << 8) | (dib[6]  << 16) | ((uint32_t)dib[7]  << 24));
+  int32_t  bmpHeightRaw = (int32_t)(dib[8]  | (dib[9]  << 8) | (dib[10] << 16) | ((uint32_t)dib[11] << 24));
+  uint16_t bpp          = dib[14] | (dib[15] << 8);
+  uint32_t compression  = dib[16] | (dib[17] << 8) | (dib[18] << 16) | ((uint32_t)dib[19] << 24);
+  uint32_t colorsUsed   = dib[32] | (dib[33] << 8) | (dib[34] << 16) | ((uint32_t)dib[35] << 24);
+
+  bool topDown = bmpHeightRaw < 0;
+  uint32_t bmpHeight = topDown ? (uint32_t)(-bmpHeightRaw) : (uint32_t)bmpHeightRaw;
+
+  Serial.printf("BMP %ldx%lu, %u bpp, compression=%lu, colorsUsed=%lu, topDown=%d\n",
+                (long)bmpWidth, (unsigned long)bmpHeight, bpp,
+                (unsigned long)compression, (unsigned long)colorsUsed, topDown);
+
+  if (compression != 0) {
+    Serial.println("Only uncompressed (BI_RGB) BMPs are supported");
+    http.end();
+    return false;
+  }
+  if (bpp != 1 && bpp != 8 && bpp != 24) {
+    Serial.printf("Unsupported bit depth: %u (only 1, 8, or 24 bpp supported)\n", bpp);
+    http.end();
+    return false;
+  }
+  if ((uint32_t)bmpWidth != PANEL_WIDTH || bmpHeight != PANEL_HEIGHT) {
+    Serial.printf("BMP size (%ldx%lu) does not match expected %ux%u - aborting\n",
+                  (long)bmpWidth, (unsigned long)bmpHeight, PANEL_WIDTH, PANEL_HEIGHT);
+    http.end();
+    return false;
+  }
+
+  // Skip any extra DIB header bytes (e.g. a V4/V5 header instead of the plain 40-byte one)
+  if (dibSize > sizeof(dib)) {
+    if (!skipBytes(*stream, dibSize - sizeof(dib))) { http.end(); return false; }
+  }
+
+  // ---- For 1/8 bpp, read the color palette so we know which index is "black" ----
+  uint32_t paletteBytes = 0;
+  if (bpp <= 8) {
+    uint32_t numColors = colorsUsed != 0 ? colorsUsed : (1u << bpp);
+    if (numColors > 256) numColors = 256;
+    paletteBytes = numColors * 4;
+
+    uint8_t palette[1024]; // 256 entries * 4 bytes max - small, fine on the stack
+    if (!readFully(*stream, palette, paletteBytes)) {
+      Serial.println("Failed to read color palette");
+      http.end();
       return false;
     }
+    for (uint32_t i = 0; i < numColors; i++) {
+      uint8_t b = palette[i * 4 + 0];
+      uint8_t g = palette[i * 4 + 1];
+      uint8_t r = palette[i * 4 + 2];
+      uint16_t gray = (r * 299 + g * 587 + b * 114) / 1000;
+      blackTable[i] = (gray <= 128);
+    }
   }
 
-  Serial.print("INFO: Requesting URL: ");
-  Serial.println(String("https://") + hostname + path);
-  client.print(String("GET ") + path + " HTTP/1.1\r\n" +
-               "Host: " + hostname + "\r\n" +
-               "User-Agent: BusDepartureBoard\r\n" +
-               "Connection: close\r\n\r\n");
-  Serial.println("INFO: Request sent");
+  // dataOffset is authoritative - skip forward if there's any gap left (rare)
+  uint32_t consumedSoFar = 14 + dibSize + paletteBytes;
+  if (dataOffset > consumedSoFar) {
+    if (!skipBytes(*stream, dataOffset - consumedSoFar)) { http.end(); return false; }
+  }
 
-  bool connection_ok = false;
+  // General BMP row-padding formula, works for 1/8/24 bpp alike
+  const size_t rowBytesIn = (((uint32_t)PANEL_WIDTH * bpp + 31) / 32) * 4;
+  if (rowBytesIn > sizeof(bmpRowBuf)) {
+    // Can't happen with PANEL_WIDTH=800 and bpp in {1,8,24}, but guard anyway
+    // since bmpRowBuf is a fixed-size static buffer.
+    Serial.println("BMP row too large for static row buffer");
+    http.end();
+    return false;
+  }
 
-  Serial.println("<---- BEGIN HEADER ---->");
-  while (client.connected())
-  {
-    String line = client.readStringUntil('\n');
+  memset(framebuffer, 0xFF, FRAMEBUFFER_SIZE); // start all-white; we clear bits for black pixels
 
-    connection_ok = line.startsWith("HTTP/1.1 200 OK");
-    Serial.println(line);
+  const uint8_t threshold = 128; // used only for the 24bpp path; tune if needed
 
-    if (line == "\r")
-    {
-      Serial.println("Headers received");
+  bool ok = true;
+
+  Serial.print("Downloading BMP");
+  for (uint32_t r = 0; r < PANEL_HEIGHT; r++) {
+    if(r % 10 == 0) { Serial.print("."); }
+
+    if (!readFully(*stream, bmpRowBuf, rowBytesIn)) {
+      Serial.printf("Failed reading BMP row %lu\n", (unsigned long)r);
+      ok = false;
       break;
     }
-  }
-  Serial.println("<---- END HEADER ---->");
 
-  uint16_t file_signature = 0;
+    // BMP rows are bottom-to-top by default; map into the correct output row
+    uint32_t outRow = topDown ? r : (PANEL_HEIGHT - 1 - r);
+    uint8_t *destRow = framebuffer + outRow * FRAMEBUFFER_ROW_BYTES;
+    
+    if(r % 10 == 0) { Serial.print("`"); }
 
-  // Read bytes until we see the bitmap file header
-  for (int16_t i = 0; i < MAX_EXPECTED_HEADER_POSITION_BYTES; i++)
-  {
-    if (!client.available()) {
-      delay(100);
-    } else {
-      file_signature = read16LEFromClient(client);
+    for (uint16_t x = 0; x < PANEL_WIDTH; x++) {
+      bool isBlack;
+
+      if (bpp == 24) {
+        uint8_t b  = bmpRowBuf[x * 3 + 0];
+        uint8_t g  = bmpRowBuf[x * 3 + 1];
+        uint8_t rr = bmpRowBuf[x * 3 + 2];
+        uint16_t gray = (rr * 299 + g * 587 + b * 114) / 1000;
+        isBlack = (gray <= threshold);
+      } else if (bpp == 8) {
+        uint8_t index = bmpRowBuf[x];
+        isBlack = blackTable[index];
+      } else { // bpp == 1
+        uint8_t byteVal = bmpRowBuf[x / 8];
+        uint8_t index = (byteVal >> (7 - (x % 8))) & 0x1;
+        isBlack = blackTable[index];
+      }
+
+      if (isBlack) {
+        destRow[x / 8] &= ~(0x80 >> (x % 8)); // clear the bit for black
+      }
+      // else: leave bit set (white) - buffer was pre-filled with 0xFF
     }
-    Serial.println(file_signature);
-    if (file_signature == BITMAP_SIGNATURE) break;
+  }
+  Serial.println(" download complete, closing HTTP connection");
+
+  if (!heap_caps_check_integrity_all(true)) {
+    Serial.println("HEAP CORRUPTED right before http.end()");
   }
 
-  if(file_signature != BITMAP_SIGNATURE) {
-    Serial.println("ERROR: Invalid file signature, did not match expected bitmap header");
-    return false;
-  }else{
-    DEBUG_PRINTLN("Found signature!");
+  http.end();
+
+  if (!heap_caps_check_integrity_all(true)) {
+    Serial.println("HEAP CORRUPTED right after http.end()");
   }
 
-  uint32_t fileSize = read32LEFromClient(client);
-  uint32_t creatorBytes = read32LEFromClient(client); (void)creatorBytes; //unused
-  uint32_t imageOffset = read32LEFromClient(client); // Start of image data
-  uint32_t headerSize = read32LEFromClient(client);
-  uint32_t width  = read32LEFromClient(client);
-  int32_t height = (int32_t) read32LEFromClient(client);
-  uint16_t planes = read16LEFromClient(client);
-  uint16_t depth = read16LEFromClient(client); // bits per pixel
-  uint32_t format = read32LEFromClient(client);
-  uint32_t bytes_read = 7 * 4 + 3 * 2;
-  uint8_t input_buffer[3 * 800]; // up to depth 24
-  uint8_t output_row_mono_buffer[1872 / 8]; // buffer for at least one row of b/w bits
-  uint8_t output_row_color_buffer[1872 / 8]; // buffer for at least one row of color bits
-  uint8_t mono_palette_buffer[256 / 8]; // palette buffer for depth <= 8 b/w
-  uint8_t color_palette_buffer[256 / 8]; // palette buffer for depth <= 8 c/w
-
-#ifdef DEBUG_MODE
-  Serial.print("File size: "); Serial.println(fileSize);
-  Serial.print("Image Offset: "); Serial.println(imageOffset);
-  Serial.print("Header size: "); Serial.println(headerSize);
-  Serial.print("Bit Depth: "); Serial.println(depth);
-  Serial.print("Image size: ");
-  Serial.print(width);
-  Serial.print('x');
-  Serial.println(height);
-  Serial.print("Planes: "); Serial.println(planes);
-  Serial.print("format: "); Serial.println(format);
-#endif
-
-  if ((planes != 1) || ((format != 0) && (format != 3))) // uncompressed is handled, 565 also
-  {
-    Serial.println("ERROR: Unable to handle bitmap format!");
+  if (!ok) {
     return false;
   }
 
-  uint32_t rowSize = (width * depth / 8 + 3) & ~3;
+  display.writeImage(framebuffer, 0, 0, PANEL_WIDTH, PANEL_HEIGHT); // flip to writeImage(..., true) if colors look inverted
 
-  connection_ok = true;
-  uint8_t bitmask = 0xFF;
-  uint8_t bitshift = 8 - depth;
-  uint16_t red, green, blue;
-  bool whitish = false;
-  bool colored = false;
-  if (depth <= 8)
-  {
-    bytes_read += skipBytes(client, imageOffset - (4 << depth) - bytes_read); // 54 for regular, diff for colorsimportant
-    for (uint16_t pn = 0; pn < (1 << depth); pn++)
-    {
-      blue  = client.read();
-      green = client.read();
-      red   = client.read();
-      client.read();
-      bytes_read += 4;
-      whitish = false ? ((red > 0x80) && (green > 0x80) && (blue > 0x80)) : ((red + green + blue) > 3 * 0x80); // whitish
-      colored = (red > 0xF0) || ((green > 0xF0) && (blue > 0xF0)); // reddish or yellowish?
-      if (0 == pn % 8) mono_palette_buffer[pn / 8] = 0;
-      mono_palette_buffer[pn / 8] |= whitish << pn % 8;
-      if (0 == pn % 8) color_palette_buffer[pn / 8] = 0;
-      color_palette_buffer[pn / 8] |= colored << pn % 8;
-    }
-  }
-  Serial.print("Whitish, colored: ");
-  Serial.print(whitish);
-  Serial.println(colored);
-
-  display.clearScreen();
-  display.setRotation(0);
-  uint32_t rowPosition = true ? imageOffset + (0) * rowSize : imageOffset;
-  bytes_read += skipBytes(client, rowPosition - bytes_read);
-
-  Serial.println("About to for(each line)");
-  for (uint16_t row = 0; row < height; row++, rowPosition += rowSize) // for each line
-  {
-    if (!(client.connected() || client.available())) break;
-    delay(1); // yield() to avoid WDT
-    uint32_t in_remain = rowSize;
-    uint32_t in_idx = 0;
-    uint32_t in_bytes = 0;
-    uint8_t in_byte = 0; // for depth <= 8
-    uint8_t in_bits = 0; // for depth <= 8
-    uint8_t out_byte = 0xFF; // white (for w%8!=0 border)
-    uint8_t out_color_byte = 0xFF; // white (for w%8!=0 border)
-    uint32_t out_idx = 0;
-    for (uint16_t col = 0; col < width; col++) // for each pixel
-    {
-      yield();
-      if (!(client.connected() || client.available())) break;
-      // Time to read more pixel data?
-      if (in_idx >= in_bytes) // ok, exact match for 24bit also (size IS multiple of 3)
-      {
-        uint32_t get = in_remain > sizeof(input_buffer) ? sizeof(input_buffer) : in_remain;
-        uint32_t got = read8n(client, input_buffer, get);
-        while ((got < get) && connection_ok)
-        {
-          //Serial.print("got "); Serial.print(got); Serial.print(" < "); Serial.print(get); Serial.print(" @ "); Serial.println(bytes_read);
-          uint32_t gotmore = read8n(client, input_buffer + got, get - got);
-          got += gotmore;
-          connection_ok = gotmore > 0;
-        }
-        in_bytes = got;
-        in_remain -= got;
-        bytes_read += got;
-        in_idx = 0;
-      }
-      if (!connection_ok)
-      {
-        Serial.print("Error: got no more after "); Serial.print(bytes_read); Serial.println(" bytes read!");
-        break;
-      }
-      switch (depth)
-      {
-        case 8:
-          {
-            if (0 == in_bits)
-            {
-              in_byte = input_buffer[in_idx++];
-              in_bits = 8;
-            }
-            uint16_t pn = in_byte & bitmask;
-            whitish = mono_palette_buffer[pn / 8] & (0x1 << pn % 8);
-            colored = color_palette_buffer[pn / 8] & (0x1 << pn % 8);
-            in_byte <<= depth;
-            in_bits -= depth;
-          }
-          break;
-      }
-      if (whitish)
-      {
-        // keep white
-      }
-      else if (colored && false)
-      {
-        out_color_byte &= ~(0x80 >> col % 8); // colored
-      }
-      else
-      {
-        out_byte &= ~(0x80 >> col % 8); // black
-      }
-      if ((7 == col % 8) || (col == width - 1)) // write that last byte! (for w%8!=0 border)
-      {
-        output_row_color_buffer[out_idx] = out_color_byte;
-        output_row_mono_buffer[out_idx++] = out_byte;
-        out_byte = 0xFF; // white (for w%8!=0 border)
-        out_color_byte = 0xFF; // white (for w%8!=0 border)
-      }
-    } // end pixel
-    int16_t yrow = 0 + (true ? height - row - 1 : row);
-    display.writeImage(output_row_mono_buffer, output_row_color_buffer, 0, yrow, width, 1);
-  } // end line
-  Serial.print("downloaded in ");
-  Serial.print(millis() - startTime);
-  Serial.println(" ms");
   display.refresh();
 
-  Serial.print("bytes read "); Serial.println(bytes_read);
+  Serial.println("Image drawn");
 
-  client.stop();
+  if (!heap_caps_check_integrity_all(true)) {
+    Serial.println("HEAP CORRUPTED end of display function");
+  }
+
+  Serial.printf("stack high water mark (end of display loop): %u bytes free\n", uxTaskGetStackHighWaterMark(NULL));
   return true;
 }

@@ -9,7 +9,6 @@ extern WiFiMulti wifiMulti;
 extern WiFiClientSecure client;
 
 // Public API
-void initWifiClient();
 void initWifi();
 void refreshWifiConnection();
 

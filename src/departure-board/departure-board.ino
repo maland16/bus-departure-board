@@ -1,6 +1,9 @@
 #define ENABLE_GxEPD2_GFX 0
+#define DEBUG_MODE
+#define configCHECK_FOR_STACK_OVERFLOW 2
 
 #include <ESP32Time.h>
+#include <esp_task_wdt.h>
 
 #include <WiFi.h>
 #include <WiFiClient.h>
@@ -11,20 +14,21 @@
 #include "credentials.h"
 #include "debug-print.h"
 #include "display-driver.h"
-#include "wifi-driver.h"
 #include "rtc-driver.h"
-
-#define DEBUG_MODE
+#include "task-supervisor.h"
+#include "wifi-driver.h"
 
 #define SERIAL_BAUD (115200)
 
-#define RTC_UPDATE_PERIOD_MIN (60)
-#define RTC_UPDATE_PERIOD_SEC (RTC_UPDATE_PERIOD_MIN * 60)
-#define RTC_UPDATE_PERIOD_MS (RTC_UPDATE_PERIOD_SEC * 1000)
+#define RTC_UPDATE_PERIOD_MIN (60UL)
+#define RTC_UPDATE_PERIOD_SEC (RTC_UPDATE_PERIOD_MIN * 60UL)
+#define RTC_UPDATE_PERIOD_MS (RTC_UPDATE_PERIOD_SEC * 1000UL)
 
-#define MAIN_TASK_PERIOD_MS (1000)
-#define DISPLAY_UPDATE_PERIOD_SEC (60)
-#define DISPLAY_UPDATE_PERIOD_MS (DISPLAY_UPDATE_PERIOD_SEC * 1000)
+#define MAIN_TASK_PERIOD_MS (1000UL)
+#define DISPLAY_UPDATE_PERIOD_SEC (10UL)
+#define DISPLAY_UPDATE_PERIOD_MS (DISPLAY_UPDATE_PERIOD_SEC * 1000UL)
+#define HEARTBEAT_TASK_PERIOD_MS (10000UL)
+#define HEARTBEAT_LED_PIN LED_BUILTIN
 
 // When to stop/start fetching live data
 #define WAKE_UP_TIME_HOUR (5) // 5AM
@@ -38,18 +42,39 @@ enum MainState {
     STATE_LOW_POWER,
 };
 
+static const char *ucopURL = "https://transit.ucop.me/stops/1117/display/gdem075t41wt/display.bmp";
+
 // FreeRTOS tasks
 TaskHandle_t updateRTCTaskHandle = NULL;
 TaskHandle_t mainDisplayTaskHandle = NULL;
+TaskHandle_t heartbeatTaskHandle = NULL;
+TaskHandle_t supervisorTaskHandle = NULL;
 
 MainState mainState = STATE_DEFAULT;
-unsigned long lastDisplayUpdateMs = 0;
+unsigned long lastDisplayUpdateMs = 0U;
 
 void setup() {
+  
+  esp_task_wdt_config_t twdt_config = {
+    .timeout_ms = 30000,                            // Time in milliseconds (20 seconds)
+    .idle_core_mask = 0, 
+    .trigger_panic = true                           // Enable panic/reset on timeout
+  };
+
+  // 2. Initialize the watchdog using the struct pointer
+  esp_task_wdt_reconfigure(&twdt_config);
+
   // put your setup code here, to run once:
   Serial.begin(SERIAL_BAUD);
   DEBUG_PRINTLN("Serial Initialized");
-  initDisplay();
+
+  esp_reset_reason_t r = esp_reset_reason();
+  Serial.printf("Reset reason: %d\n", (int)r);
+
+  pinMode(HEARTBEAT_LED_PIN, OUTPUT);
+  digitalWrite(HEARTBEAT_LED_PIN, LOW);
+
+  initDisplayDriver();
   DEBUG_PRINTLN("Display Initialized");
 
   initWifi();
@@ -58,33 +83,61 @@ void setup() {
   initClock();
   DEBUG_PRINTLN("Clock Initialized");
 
-  initWifiClient();
 
-  connectAndGetImage();
 
+  /*
+  xTaskCreatePinnedToCore(
+    vSupervisorTask,         // Task function
+    "vSupervisorTask",       // Task name
+    5000,             // Stack size (bytes)
+    NULL,              // Parameters
+    1,                 // Priority
+    &supervisorTaskHandle,  // Task handle
+    0                  // Core 0
+  );
+
+  registerTaskWithSupervisor(supervisorTaskHandle, "vSupervisorTask", 5000);
+  
   Serial.println("Starting updateRTCTask()");
   xTaskCreatePinnedToCore(
     updateRTCTask,         // Task function
     "updateRTCTask",       // Task name
-    10000,             // Stack size (bytes)
+    5000,             // Stack size (bytes)
     NULL,              // Parameters
     1,                 // Priority
     &updateRTCTaskHandle,  // Task handle
     0                  // Core 0
   );
 
+  registerTaskWithSupervisor(updateRTCTaskHandle, "updateRTCTask", 5000);
+*/
+  Serial.println("Starting heartbeatTask()");
+  xTaskCreatePinnedToCore(
+    heartbeatTask,
+    "heartbeatTask",
+    4096,
+    NULL,
+    1,
+    &heartbeatTaskHandle,
+    1
+  );
+
   Serial.println("Starting mainDisplayTask()");
   xTaskCreatePinnedToCore(
     mainDisplayTask,         // Task function
     "mainDisplayTask",       // Task name
-    10000,             // Stack size (bytes)
+    20000,             // Stack size (bytes)
     NULL,              // Parameters
     1,                 // Priority
     &mainDisplayTaskHandle,  // Task handle
     1                  // Core 1
   );
+
+  // registerTaskWithSupervisor(mainDisplayTaskHandle, "mainDisplayTask", 10000);
   
-  delay(5000);
+  mainState = STATE_RUNNING; // Hard code to running for now
+
+  // delay(60000);
 
   /*
   for(int i = 0; i < 5; i++) {
@@ -93,18 +146,33 @@ void setup() {
   }
   */
   
-  clearScreenPowerOff();
+  // clearScreenPowerOff();
 }
 
 void updateRTCTask(void *parameter) {
   for (;;) { // Infinite loop
     vTaskDelay(RTC_UPDATE_PERIOD_MS / portTICK_PERIOD_MS);
-    DEBUG_PRINTLN("Updated RTC from Internet");
     updateRTCFromNPT();
+    DEBUG_PRINTLN("Updated RTC from Internet");
   }
 }
 
-void mainDisplayTask(void *paremeter) {
+void heartbeatTask(void *parameter) {
+  (void)parameter;
+
+  for (;;) {
+    digitalWrite(HEARTBEAT_LED_PIN, HIGH);
+    vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_TASK_PERIOD_MS / 2));
+    digitalWrite(HEARTBEAT_LED_PIN, LOW);
+    vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_TASK_PERIOD_MS / 2));
+  }
+}
+
+void mainDisplayTask(void *parameter) {
+  (void)parameter;
+
+  
+
   for (;;) { // Infinite loop
     vTaskDelay(MAIN_TASK_PERIOD_MS / portTICK_PERIOD_MS);
     
@@ -113,8 +181,9 @@ void mainDisplayTask(void *paremeter) {
 }
 
 void mainStateMachine(void) {
+     
   // Check for enter low power
-  // Check for enter sleep
+  // Check for enter/exit sleep
 
   switch(mainState) {
     case STATE_DEFAULT: {
@@ -123,9 +192,12 @@ void mainStateMachine(void) {
     }
     case STATE_RUNNING: {
       // Update display periodically
-      if(lastDisplayUpdateMs - millis() > DISPLAY_UPDATE_PERIOD_MS) {
+      if(millis() - lastDisplayUpdateMs > DISPLAY_UPDATE_PERIOD_MS) {
         // Time to update the display!
-        connectAndGetImage();
+        esp_task_wdt_add(NULL); // Start & feed watchdog in case things get weird
+        esp_task_wdt_reset();
+        drawBmpFromUrl(ucopURL);
+        esp_task_wdt_delete(NULL); // Release watchdog so it doesn't trigger while we're between display loops
         lastDisplayUpdateMs = millis();
       }
 
