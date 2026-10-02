@@ -18,11 +18,6 @@ void addDateTimeToPageBuffer(void);
 void showUnavailableImage(const char *url, const char *reason);
 
 /**
- * @brief Clear the screen to white and tell the display to power down
- */
-void clearScreenPowerOff(void);
-
-/**
  * @brief Grab the latest image
  */
 bool drawBmpFromUrl(const char *url);
