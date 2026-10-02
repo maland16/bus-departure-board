@@ -2,12 +2,10 @@
 
 #include <esp_sleep.h>
 
-void initDeepSleepDriver(void) {
-  Serial.println("Deep sleep driver initialized");
-}
+#define MINUTES_TO_MICROSECONDS (60ULL * 1000000ULL)
 
 void deepSleepForMinutes(uint32_t minutes) {
-  const uint64_t sleepUs = (uint64_t)minutes * 60ULL * 1000000ULL; // Convert to microseconds
+  const uint64_t sleepUs = (uint64_t)minutes * MINUTES_TO_MICROSECONDS; // Convert to microseconds
 
   Serial.printf("Entering deep sleep for %lu minute(s)\n", (unsigned long)minutes);
   Serial.println("goodnight!");

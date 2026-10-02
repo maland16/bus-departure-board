@@ -51,6 +51,7 @@ void initDisplayDriver()
     http.setReuse(false);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // in case the file is served via a CDN/redirect
     http.setTimeout(8000);
+    DEBUG_PRINTLN("Display initialized");
 }
 
 // ---- Blocking read of exactly `len` bytes from any Stream, with a stall timeout ----
