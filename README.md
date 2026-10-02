@@ -6,29 +6,28 @@ The goal of this project is to create a relatively low cost standalone live depa
 ```mermaid
 graph TD;
 
-    A[GPMetro GTFS Feed] --> B["Server (Pi, VPS, or the like) parsing GTFS and storing telemetry data"];
-    B -->|Recent & Upcoming Departures|C[ESP-32 Based display at bus stop];
+    A[GPMetro GTFS Feed] --> B["UCOP transit server parses GTFS and makes pretty image"];
+    
+    B -->|Bitmap image of recent & upcoming departures|C[ESP-32 Based display at bus stop];
 
-    C -->|"Telemetry Data (Batt/Solar voltage, temp, status, etc.)"|B;
+    D["Server (Pi, VPS, or the like) stores telemetry data viewable via Grafana*"] ---|"Telemetry Data (Batt/Solar voltage, temp, status, etc.)"|C;
 ```
+\*this was omitted from version 1
 
 ## Electrical Topology
 [Read more here](docs/electricalTopology.md)
 
 ## Physical Layer Options
-- Wifi via ESP32 hardware
+- Wifi via ESP32 hardware [ Selected for version 1 ]
     - Advantages: Built into the ESP32 hardware, easy to setup and well supported
     - Disadvantages: Wifi is not hugely reliable outdoors, and relying on random public networks as a part of infrastructure isn't great
 - LoRa via external hardware
     - Advantages: LoRa has far better range and probably better reliability, and there's only one bridge to the internet instead of one on each ESP32. This solution might also be more scalable, though I'm not super familir with the scalability of LoRa used for this purpose
     - Disadvantages: Requires working around bandwith limitations (no photos sent to displays), and requires a gateway to bridge LoRa -> HTTPS. Also requires getting and using specialized LoRa hardware
-- A secret third thing??
-
-## Open questions:
-- Do we render an image for the ESP32 to display server side or does the server just parse the GTFS and the ESP32 can get it and render a display?
-    - How much work does Todd's UCOP website do in the background to make that display (ex: arrival time estimates, etc)?
-    - How pretty/functional could the display be if it was rendered on the ESP32?
-- How do we get telemetry back from the ESP32 to know if it's working? (Grafana dashboard 👀)
+- Cellular
+    - Advantages: Reliability, range, throughput (can still do bitmaps). This is what the commercially available products use.
+    - Disadvantages: Cost (hardware, subscription), power consumption.
+- A secret fourth thing??
 
 ### Arduino/ESP32 Libraries
 **GxEPD2** - E-Ink display driver  
@@ -39,3 +38,9 @@ graph TD;
 `install requirements`  
 `playwright install`  
 
+### Improvements for rev 2:
+- Use backplane bracket inside the waterproof case so servicing is easier
+    - Attach display to backplane instead of the front of the case
+    - Attach all other bits to the backplane so it can be swapped out easily if needed
+- Cellular connectivity
+- Telemetry (grafana dashboard or the like)
