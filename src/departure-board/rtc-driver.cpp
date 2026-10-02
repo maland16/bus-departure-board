@@ -4,7 +4,7 @@
 #define CLOCK_TIMEZONE ("EST5EDT,M3.2.0,M11.1.0")
 
 ESP32Time rtc(0);
-bool rtcValid = false;
+RTC_DATA_ATTR bool rtcValid = false; // Save in RTC memory so it persists across deep sleep cycles
 
 bool getRTCValid() {
   return rtcValid;
@@ -26,8 +26,6 @@ void initClock()
   if (time != 0) {
     rtc.setTime(time);
     rtcValid = true;
-  } else {
-    rtcValid = false;
   }
 }
 
@@ -41,3 +39,4 @@ unsigned long getEpochTimeFromNPT()
   time(&now);
   return now;
 }
+

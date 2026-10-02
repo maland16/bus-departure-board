@@ -13,6 +13,11 @@ void helloWorld(void);
 void addDateTimeToPageBuffer(void);
 
 /**
+ * @brief Render the "live tracking unavailable" screen with a QR code.
+ */
+void showUnavailableImage(const char *url, const char *reason);
+
+/**
  * @brief Clear the screen to white and tell the display to power down
  */
 void clearScreenPowerOff(void);

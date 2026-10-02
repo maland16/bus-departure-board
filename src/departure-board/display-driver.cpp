@@ -10,6 +10,10 @@
 #include <Fonts/FreeMonoBold9pt7b.h>
 #include <Fonts/FreeMonoBold12pt7b.h>
 #include <Fonts/FreeSans18pt7b.h>
+#include <Fonts/FreeSansBold24pt7b.h>
+#include <Fonts/FreeSans12pt7b.h>
+
+#include "src/third-party/QRCode/src/rm_qrcode.h"
 
 #include "debug-print.h"
 #include "wifi-driver.h"
@@ -164,6 +168,55 @@ void addDateTimeToPageBuffer(void)
   // (for full buffered with fast partial update the (full) buffer is just transferred again, and false returned)
   while (display.nextPage());
   Serial.println("addDateTimeToPageBuffer done");
+}
+
+static void drawCentered(const char *s, int cx, int baselineY) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor(cx - w / 2 - x1, baselineY);
+  display.print(s);
+}
+
+void showUnavailableImage(const char *url, const char *reason) {
+  const uint8_t VERSION = 4;
+  const int SCALE = 10;
+  static uint8_t qrBuf[200];
+  QRCode qr;
+  qrcode_initText(&qr, qrBuf, VERSION, ECC_MEDIUM, url);
+
+  display.setRotation(1); // portrait on the 800x480 panel
+  display.setFullWindow();
+
+  const int panelW = display.width();
+  const int qrPx = qr.size * SCALE;
+  const int qrX = (panelW - qrPx) / 2;
+  const int qrY = 24;
+  const int textCx = panelW / 2;
+  const int textStartY = qrY + qrPx + 50;
+
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+
+    for (int y = 0; y < qr.size; y++) {
+      for (int x = 0; x < qr.size; x++) {
+        if (qrcode_getModule(&qr, x, y)) {
+          display.fillRect(qrX + x * SCALE, qrY + y * SCALE, SCALE, SCALE, GxEPD_BLACK);
+        }
+      }
+    }
+
+    display.setTextColor(GxEPD_BLACK);
+    display.setFont(&FreeSansBold24pt7b);
+    drawCentered("Live tracking", textCx, textStartY);
+    drawCentered("unavailable", textCx, textStartY + 48);
+    display.setFont(&FreeSans12pt7b);
+    drawCentered(reason, textCx, textStartY + 88);
+    drawCentered("Scan for bus tracking info", textCx, textStartY + 118);
+  } while (display.nextPage());
+
+  display.hibernate();
 }
 
 void clearScreenPowerOff(void) {

@@ -15,12 +15,12 @@
 #define DEBUG_PRINTLN(...)
 #endif
 
-#define ERROR_PRINTLN(X, ...)  \
+#define ERROR_PRINTLN(X)  \
     Serial.print("[ERROR "); \
     Serial.print(__func__); \
     Serial.print("():"); \
     Serial.print(__LINE__); \
     Serial.print("] "); \
-    Serial.println(__VA_ARGS__);
+    Serial.println(X);
 
 #endif // DEBUG_PRINT_H
