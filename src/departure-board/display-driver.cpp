@@ -42,8 +42,6 @@ static uint8_t framebuffer[FRAMEBUFFER_SIZE];
 static uint8_t bmpRowBuf[MAX_BMP_ROW_BYTES];
 static bool blackTable[256]; // palette-index -> "is this black?" lookup for 1/8bpp BMPs
 
-static char timeTextBuffer[50];
-
 void initDisplayDriver()
 {
     display.init(115200, true, 2, false); // Initialize display

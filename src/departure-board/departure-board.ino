@@ -27,8 +27,10 @@
 #define WAKE_UP_TIME_HOUR (4) // 4AM
 #define SLEEP_TIME_HOUR (12 + 11) // 11PM
 
-static const char *stopURL = "https://transit.ucop.me/stops/1117/";
-static const char *stopBMPURL = "https://transit.ucop.me/stops/1117/display/gdem075t41wt/display.bmp";
+#define STOP_BASE_URL "https://transit.ucop.me/stops/"
+
+static const char *stopURL = STOP_BASE_URL CONFIGURED_STOP_ID "/";
+static const char *stopBMPURL = STOP_BASE_URL CONFIGURED_STOP_ID "/display/gdem075t41wt/display.bmp";
 
 bool isNightTime(void) {
   const int currentMinuteOfDay = (rtc.getHour(true) * 60) + rtc.getMinute();
