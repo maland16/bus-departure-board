@@ -5,13 +5,6 @@
 
 void initDisplayDriver(void);
 
-void helloWorld(void);
-
-/**
- * @brief Add Date and "last updated" time to page buffer
- */
-void addDateTimeToPageBuffer(void);
-
 /**
  * @brief Render the "live tracking unavailable" screen with a QR code.
  */
