@@ -66,7 +66,7 @@ void setup() {
 
   // If battery voltage is too low, go to sleep and hope for sun
   initBatteryDriver();
-  Serial.printf("Battery Voltage: %.2f V\n", readBatteryVoltage());
+  printVoltages();
   if (isBatteryBelowCutoffVoltage()) {
     lowBatteryHelper();
   }
