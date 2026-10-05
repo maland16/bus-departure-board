@@ -102,7 +102,7 @@ void showUnavailableImage(const char *url, const char *reason) {
   QRCode qr;
   qrcode_initText(&qr, qrBuf, VERSION, ECC_MEDIUM, url);
 
-  display.setRotation(1); // portrait on the 800x480 panel
+  display.setRotation(3); // portrait upside down on the 800x480 panel
   display.setFullWindow();
 
   const int panelW = display.width();
@@ -110,7 +110,7 @@ void showUnavailableImage(const char *url, const char *reason) {
   const int qrX = (panelW - qrPx) / 2;
   const int qrY = 24;
   const int textCx = panelW / 2;
-  const int textStartY = qrY + qrPx + 50;
+  const int textStartY = qrY + qrPx + 72;
 
   display.firstPage();
   do {
@@ -127,10 +127,10 @@ void showUnavailableImage(const char *url, const char *reason) {
     display.setTextColor(GxEPD_BLACK);
     display.setFont(&FreeSansBold24pt7b);
     drawCentered("Live tracking", textCx, textStartY);
-    drawCentered("unavailable", textCx, textStartY + 48);
+    drawCentered("unavailable", textCx, textStartY + 58);
     display.setFont(&FreeSans12pt7b);
-    drawCentered(reason, textCx, textStartY + 88);
-    drawCentered("Scan for bus tracking info", textCx, textStartY + 118);
+    drawCentered(reason, textCx, textStartY + 102);
+    drawCentered("Scan for bus tracking info", textCx, textStartY + 136);
   } while (display.nextPage());
 
   display.hibernate();

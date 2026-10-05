@@ -14,6 +14,14 @@ void initClock()
 {
   configTzTime(CLOCK_TIMEZONE, "pool.ntp.org", "time.nist.gov");
 
+  Serial.printf("Current time: %04d-%02d-%02d %02d:%02d:%02d\n",
+  rtc.getYear(), rtc.getMonth(), rtc.getDay(),
+  rtc.getHour(true), rtc.getMinute(), rtc.getSecond());
+}
+
+
+void updateRTCFromNPT()
+{
   unsigned long time = 0;
   uint8_t timeout = 10;
 
@@ -27,6 +35,10 @@ void initClock()
     rtc.setTime(time);
     rtcValid = true;
   }
+
+  Serial.printf("Current time: %04d-%02d-%02d %02d:%02d:%02d\n",
+  rtc.getYear(), rtc.getMonth(), rtc.getDay(),
+  rtc.getHour(true), rtc.getMinute(), rtc.getSecond());
 }
 
 unsigned long getEpochTimeFromNPT()

@@ -6,7 +6,7 @@
 enum DisplayMode {
   DISPLAY_MODE_LIVE_DATA = 0,
   DISPLAY_MODE_NIGHTTIME = 1,
-  DISPLAY_MODE_LOW_BATTERY = 2,
+  DISPLAY_MODE_UNAVAILABLE = 2,
 };
 
 void initNvmDriver(void);

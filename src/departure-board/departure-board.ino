@@ -20,6 +20,7 @@
 #include "rtc-driver.h"
 #include "task-supervisor.h"
 #include "wifi-driver.h"
+#include "telemetry.h"
 
 #define SERIAL_BAUD (115200)
 
@@ -58,7 +59,9 @@ void setup() {
 
   initNvmDriver();
   printAllPreferences(); // Dump NVM to serial
-  
+
+  initClock();
+
   esp_reset_reason_t r = esp_reset_reason();
   printResetReason(r);
 
@@ -71,18 +74,19 @@ void setup() {
     lowBatteryHelper();
   }
 
+  initWifi();
+
+  DEBUG_PRINTLN("Waiting for NTP time sync");
+  updateRTCFromNPT();
+
   // If we have a good RTC time and it's night time, display nighttime image
   if (getRTCValid() && isNightTime()) {
     nightTimeDisplayHelper();
   }
 
-  initWifi();
-
-  DEBUG_PRINTLN("Waiting for NTP time sync");
-  initClock();
-  Serial.printf("Current time: %04d-%02d-%02d %02d:%02d:%02d\n",
-                rtc.getYear(), rtc.getMonth(), rtc.getDay(),
-                rtc.getHour(true), rtc.getMinute(), rtc.getSecond());
+  if(sendTelemetry()) {
+    DEBUG_PRINTLN("Telemetry sent successfully");
+  }
 
   updateDisplayAndSleep();
 }
@@ -95,16 +99,16 @@ void lowBatteryHelper(void) {
   Serial.println("Battery is below cutoff voltage! Sleeping in hopes of more solar");
 
   // If low batt image isn't displayed (check NVMEM), display it and set the bit in NVMEM
-  if (getLastDisplayedMode() != DISPLAY_MODE_LOW_BATTERY) {
-    Serial.println("Low battery display not active; displaying low battery image.");
+  if (getLastDisplayedMode() != DISPLAY_MODE_UNAVAILABLE) {
+    Serial.println("Unavailable display not active; displaying unavailable image.");
 
     showUnavailableImage(stopURL, "Low battery");
-    setLastDisplayedMode(DISPLAY_MODE_LOW_BATTERY);
+    setLastDisplayedMode(DISPLAY_MODE_UNAVAILABLE);
   } else {
     Serial.println("Low battery display already active");
   }
 
-  // TODO: display low battery image and persist mode
+  deepSleepForMinutes(30);
 }
 
 void nightTimeDisplayHelper(void) {
@@ -150,7 +154,7 @@ void updateDisplayAndSleep(void) {
   } else {
     Serial.println("Failed to display image; showing unavailable image");
     showUnavailableImage(stopURL, "Telemetry error");
-    setLastDisplayedMode(DISPLAY_MODE_LIVE_DATA);
+    setLastDisplayedMode(DISPLAY_MODE_UNAVAILABLE);
   }
 
   deepSleepForMinutes(1);
