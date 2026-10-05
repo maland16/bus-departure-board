@@ -4,10 +4,8 @@
 #include <Arduino.h>
 
 void initBatteryDriver(void);
-float readSolarVoltage(void);
-float readRegulatorVoltage(void);
 float getSolarVoltage(void);
-float getRegulatorVoltage(void);
+float getBatteryVoltage(void);
 void printVoltages(void);
 bool isBatteryBelowCutoffVoltage(void);
 

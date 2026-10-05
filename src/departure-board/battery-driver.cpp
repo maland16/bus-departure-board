@@ -1,12 +1,12 @@
 #include "battery-driver.h"
 
-#define SOLAR_ADC_PIN (A0)
+#define SOLAR_ADC_PIN (A1)
 #define SOLAR_DIVIDER_TOP_OHMS (33000.0f)
 #define SOLAR_DIVIDER_BOTTOM_OHMS (16500.0f)
 
-#define REGULATOR_ADC_PIN (A1)
-#define REGULATOR_DIVIDER_TOP_OHMS (5600.0f)
-#define REGULATOR_DIVIDER_BOTTOM_OHMS (33000.0f)
+#define BATTERY_ADC_PIN (A0)
+#define BATTERY_DIVIDER_TOP_OHMS (100000.0f)
+#define BATTERY_DIVIDER_BOTTOM_OHMS (100000.0f)
 
 #define BATTERY_CUTOFF_VOLTAGE (2.4f)
 
@@ -22,33 +22,27 @@ static float readVoltageForPin(uint8_t pin, float topOhms, float bottomOhms) {
 
 void initBatteryDriver(void) {
   pinMode(SOLAR_ADC_PIN, INPUT);
-  pinMode(REGULATOR_ADC_PIN, INPUT);
+  pinMode(BATTERY_ADC_PIN, INPUT);
   analogReadResolution(12);
   analogSetPinAttenuation(SOLAR_ADC_PIN, ADC_11db);
-  analogSetPinAttenuation(REGULATOR_ADC_PIN, ADC_11db);
-}
-
-float readSolarVoltage(void) {
-  return readVoltageForPin(SOLAR_ADC_PIN, SOLAR_DIVIDER_TOP_OHMS, SOLAR_DIVIDER_BOTTOM_OHMS);
-}
-
-float readRegulatorVoltage(void) {
-  return readVoltageForPin(REGULATOR_ADC_PIN, REGULATOR_DIVIDER_TOP_OHMS, REGULATOR_DIVIDER_BOTTOM_OHMS);
+  analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db);
 }
 
 float getSolarVoltage(void) {
-  return readSolarVoltage();
+  return readVoltageForPin(SOLAR_ADC_PIN, SOLAR_DIVIDER_TOP_OHMS, SOLAR_DIVIDER_BOTTOM_OHMS);
 }
 
-float getRegulatorVoltage(void) {
-  return readRegulatorVoltage();
+float getBatteryVoltage(void) {
+  return readVoltageForPin(BATTERY_ADC_PIN, BATTERY_DIVIDER_TOP_OHMS, BATTERY_DIVIDER_BOTTOM_OHMS);
 }
 
 void printVoltages(void) {
   Serial.printf("Solar voltage: %.2f V\n", getSolarVoltage());
-  Serial.printf("Regulator voltage: %.2f V\n", getRegulatorVoltage());
+  Serial.printf("Battery voltage: %.2f V\n", getBatteryVoltage());
 }
 
 bool isBatteryBelowCutoffVoltage(void) {
-  return getRegulatorVoltage() < BATTERY_CUTOFF_VOLTAGE;
+  return false; // TEMP
+
+  return getBatteryVoltage() < BATTERY_CUTOFF_VOLTAGE;
 }
