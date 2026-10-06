@@ -8,7 +8,7 @@
 #define BATTERY_DIVIDER_TOP_OHMS (100000.0f)
 #define BATTERY_DIVIDER_BOTTOM_OHMS (100000.0f)
 
-#define BATTERY_CUTOFF_VOLTAGE (2.4f)
+#define BATTERY_CUTOFF_VOLTAGE (2.5f)
 
 static float readVoltageForPin(uint8_t pin, float topOhms, float bottomOhms) {
   const int adcReadingMv = analogReadMilliVolts(pin);

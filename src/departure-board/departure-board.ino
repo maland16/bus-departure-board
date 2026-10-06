@@ -16,7 +16,6 @@
 #include "debug-print.h"
 #include "deep-sleep-driver.h"
 #include "display-driver.h"
-#include "nvm-driver.h"
 #include "rtc-driver.h"
 #include "task-supervisor.h"
 #include "wifi-driver.h"
@@ -29,6 +28,12 @@
 #define SLEEP_TIME_HOUR (12 + 11) // 11PM
 
 #define STOP_BASE_URL "https://transit.ucop.me/stops/"
+
+// How long should we wait before considering the data on the display to be too stale
+#define DISPLAY_STALE_SECONDS (30 * 60)
+
+RTC_DATA_ATTR DisplayMode lastDisplayedMode = DISPLAY_MODE_NONE;
+RTC_DATA_ATTR uint32_t lastDisplayUpdateEpoch = 0;
 
 static const char *stopURL = STOP_BASE_URL CONFIGURED_STOP_ID "/";
 static const char *stopBMPURL = STOP_BASE_URL CONFIGURED_STOP_ID "/display/gdem075t41wt/display.bmp";
@@ -57,9 +62,6 @@ void setup() {
   DEBUG_PRINTLN("Serial Initialized");
   Serial.println("--- DEPARTURE BOARD STARTUP ---");
 
-  initNvmDriver();
-  printAllPreferences(); // Dump NVM to serial
-
   initClock();
 
   esp_reset_reason_t r = esp_reset_reason();
@@ -84,10 +86,6 @@ void setup() {
     nightTimeDisplayHelper();
   }
 
-  if(sendTelemetry()) {
-    DEBUG_PRINTLN("Telemetry sent successfully");
-  }
-
   updateDisplayAndSleep();
 }
 
@@ -99,11 +97,11 @@ void lowBatteryHelper(void) {
   Serial.println("Battery is below cutoff voltage! Sleeping in hopes of more solar");
 
   // If low batt image isn't displayed (check NVMEM), display it and set the bit in NVMEM
-  if (getLastDisplayedMode() != DISPLAY_MODE_UNAVAILABLE) {
+  if (lastDisplayedMode != DISPLAY_MODE_UNAVAILABLE) {
     Serial.println("Unavailable display not active; displaying unavailable image.");
 
     showUnavailableImage(stopURL, "Low battery");
-    setLastDisplayedMode(DISPLAY_MODE_UNAVAILABLE);
+    lastDisplayedMode = DISPLAY_MODE_UNAVAILABLE;
   } else {
     Serial.println("Low battery display already active");
   }
@@ -112,15 +110,17 @@ void lowBatteryHelper(void) {
 }
 
 void nightTimeDisplayHelper(void) {
-  // If night time image isn't displayed (check NVMEM), display it and set the bit in NVMEM
-  if (getLastDisplayedMode() != DISPLAY_MODE_NIGHTTIME) {
+
+  if (lastDisplayedMode != DISPLAY_MODE_NIGHTTIME) {
     Serial.println("Nighttime display not active; displaying nighttime image.");
-    setLastDisplayedMode(DISPLAY_MODE_NIGHTTIME);
+    lastDisplayedMode = DISPLAY_MODE_NIGHTTIME;
   } else {
     Serial.println("Nighttime display already active");
   }
 
   Serial.println("It's night time! Sleeping until the wake-up hour.");
+
+  sendTelemetryWithRetries();
 
   const int currentMinuteOfDay = (rtc.getHour(true) * 60) + rtc.getMinute();
   const int wakeMinuteOfDay = (WAKE_UP_TIME_HOUR * 60);
@@ -142,7 +142,8 @@ void nightTimeDisplayHelper(void) {
 }
 
 void updateDisplayAndSleep(void) {
-  
+  const uint32_t timeSinceLastDisplayUpdate = getTimeSinceLastUpdate();
+
   esp_task_wdt_add(NULL); // Start & 
   esp_task_wdt_reset();   // feed watchdog in case things get weird
   bool displayedImageSuccessfully = drawBmpFromUrl(stopBMPURL);
@@ -150,17 +151,20 @@ void updateDisplayAndSleep(void) {
 
   if (displayedImageSuccessfully) {
     Serial.println("Image displayed successfully");
-    setLastDisplayedMode(DISPLAY_MODE_LIVE_DATA);
-  } else {
-    Serial.println("Failed to display image; showing unavailable image");
-    showUnavailableImage(stopURL, "Telemetry error");
-    setLastDisplayedMode(DISPLAY_MODE_UNAVAILABLE);
+    lastDisplayedMode = DISPLAY_MODE_LIVE_DATA;
+    lastDisplayUpdateEpoch = rtc.getEpoch();
   }
+
+  if (lastDisplayUpdateEpoch != 0 && timeSinceLastDisplayUpdate > DISPLAY_STALE_SECONDS) {
+    Serial.printf("Last successful display update was %lu seconds ago; showing unavailable image.\n",
+                  (unsigned long)timeSinceLastDisplayUpdate);
+    showUnavailableImage(stopURL, "Tracking unavailable");
+    lastDisplayedMode = DISPLAY_MODE_UNAVAILABLE;
+  }
+
+  sendTelemetryWithRetries();
 
   deepSleepForMinutes(1);
 }
 
-void loop() {
-  // put your main code here, to run repeatedly:
-
-}
+void loop() { }

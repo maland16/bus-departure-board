@@ -4,5 +4,6 @@
 #include <Arduino.h>
 
 bool sendTelemetry(void);
+void sendTelemetryWithRetries(void);
 
 #endif // TELEMETRY_H

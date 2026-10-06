@@ -6,7 +6,7 @@
 #include <ESP32Time.h>
 
 extern ESP32Time rtc;
-extern RTC_DATA_ATTR bool rtcValid;
+extern bool rtcValid;
 
 void initClock();
 unsigned long getEpochTimeFromNPT();

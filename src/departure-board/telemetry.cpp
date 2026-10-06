@@ -3,10 +3,13 @@
 #include "credentials.h"
 #include "wifi-driver.h"
 #include "battery-driver.h"
-#include "nvm-driver.h"
+#include "deep-sleep-driver.h"
+#include "rtc-driver.h"
 #include <HTTPClient.h>
 #include <esp_system.h>
 #include <esp_timer.h>
+
+#define TELEMETRY_RETRIES 3
 
 // Escape characters that are special in line-protocol tag values
 static String escapeTag(const String& in) {
@@ -23,12 +26,26 @@ static String escapeTag(const String& in) {
 // Non-finite floats would produce an invalid line, so swap in a sentinel
 static float sane(float v) { return isfinite(v) ? v : -1.0f; }
 
+void sendTelemetryWithRetries(void) {
+  int retries = 0;
+  while (!sendTelemetry() && retries < TELEMETRY_RETRIES) {
+    Serial.println("Telemetry failed; retrying in 3 seconds");
+    delay(3000);
+    retries++;
+  }
+
+  if (retries != TELEMETRY_RETRIES) {
+    Serial.println("Telemetry sent successfully");
+  }
+}
+
 bool sendTelemetry() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
   float solarV   = sane(getSolarVoltage());
   float batteryV = sane(getBatteryVoltage());
-  int   mode     = (int)getLastDisplayedMode();
+  int   mode     = (int)lastDisplayedMode;
+  uint32_t staleSeconds = getTimeSinceLastUpdate();
   long long uptimeS = esp_timer_get_time() / 1000000LL;  // 64-bit, no 49-day wrap
 
   String ssid = escapeTag(WiFi.SSID());
@@ -38,10 +55,11 @@ bool sendTelemetry() {
   int n = snprintf(body, sizeof(body),
     "diagnostics,device=%s "
       "solar_v=%.3f,battery_v=%.3f,rssi=%di,display_mode=%di,reset_reason=%di,"
-      "heap_free=%ui,heap_min=%ui,uptime_s=%lldi\n"
+      "time_since_last_update_s=%lu,heap_free=%ui,heap_min=%ui,uptime_s=%lldi\n"
     "network,device=%s,ssid=%s connected=1i",
     GRAFANA_DEVICE,
     solarV, batteryV, WiFi.RSSI(), mode, (int)esp_reset_reason(),
+    (unsigned long)staleSeconds,
     (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(), uptimeS,
     GRAFANA_DEVICE, ssid.c_str());
 
