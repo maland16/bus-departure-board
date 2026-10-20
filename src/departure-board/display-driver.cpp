@@ -347,6 +347,8 @@ bool drawBmpFromUrl(const char *url) {
 
   Serial.println("Image drawn");
 
+  display.hibernate();
+
   if (!heap_caps_check_integrity_all(true)) {
     Serial.println("HEAP CORRUPTED end of display function");
   }

@@ -84,9 +84,15 @@ void setup() {
   // If we have a good RTC time and it's night time, display nighttime image
   if (getRTCValid() && isNightTime()) {
     nightTimeDisplayHelper();
+    // this^ call puts us to sleep for the night, so nothing below is reached
   }
 
-  updateDisplayAndSleep();
+  // Battery is good, and it's day time, display the upcoming busses!
+  updateDisplay();
+
+  sendTelemetryWithRetries();
+
+  deepSleepForMinutes(1);
 }
 
 /**
@@ -141,7 +147,7 @@ void nightTimeDisplayHelper(void) {
   deepSleepForMinutes((uint32_t)minutesUntilWake);
 }
 
-void updateDisplayAndSleep(void) {
+void updateDisplay(void) {
   const uint32_t timeSinceLastDisplayUpdate = getTimeSinceLastUpdate();
 
   esp_task_wdt_add(NULL); // Start & 
@@ -158,13 +164,9 @@ void updateDisplayAndSleep(void) {
   if (lastDisplayUpdateEpoch != 0 && timeSinceLastDisplayUpdate > DISPLAY_STALE_SECONDS) {
     Serial.printf("Last successful display update was %lu seconds ago; showing unavailable image.\n",
                   (unsigned long)timeSinceLastDisplayUpdate);
-    showUnavailableImage(stopURL, "Tracking unavailable");
+    showUnavailableImage(stopURL, "Data stale");
     lastDisplayedMode = DISPLAY_MODE_UNAVAILABLE;
   }
-
-  sendTelemetryWithRetries();
-
-  deepSleepForMinutes(1);
 }
 
 void loop() { }
