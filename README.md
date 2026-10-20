@@ -10,12 +10,14 @@ graph TD;
     
     B -->|Bitmap image of recent & upcoming departures|C[ESP-32 Based display at bus stop];
 
-    D["Server (Pi, VPS, or the like) stores telemetry data viewable via Grafana*"] ---|"Telemetry Data (Batt/Solar voltage, temp, status, etc.)"|C;
+    D["InfluxDB viewable via Grafana"] ---|"Telemetry Data (Batt/Solar voltage, temp, status, etc.)"|C;
 ```
-\*this was omitted from version 1
 
 ## Electrical Topology
-[Read more here](docs/electricalTopology.md)
+
+![Internals](docs/V1-internals.jpg)
+
+### [Read more here](docs/electricalTopology.md)
 
 ## Physical Layer Options
 - Wifi via ESP32 hardware [ Selected for version 1 ]
@@ -32,15 +34,11 @@ graph TD;
 ### Arduino/ESP32 Libraries
 **GxEPD2** - E-Ink display driver  
 **WifiClientSecure** - For HTTPS  
-**ESP32Time** - Why this one over time.h?
-
-### Python Script Installation
-`install requirements`  
-`playwright install`  
+**ESP32Time**
 
 ### Improvements for rev 2:
 - Use backplane bracket inside the waterproof case so servicing is easier
     - Attach display to backplane instead of the front of the case
     - Attach all other bits to the backplane so it can be swapped out easily if needed
 - Cellular connectivity
-- Telemetry (grafana dashboard or the like)
+- Use [powerfeather ESP32](https://powerfeather.dev/)
