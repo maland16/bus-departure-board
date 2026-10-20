@@ -164,8 +164,12 @@ void updateDisplay(void) {
   if (lastDisplayUpdateEpoch != 0 && timeSinceLastDisplayUpdate > DISPLAY_STALE_SECONDS) {
     Serial.printf("Last successful display update was %lu seconds ago; showing unavailable image.\n",
                   (unsigned long)timeSinceLastDisplayUpdate);
-    showUnavailableImage(stopURL, "Data stale");
-    lastDisplayedMode = DISPLAY_MODE_UNAVAILABLE;
+
+    // Only update the display if we haven't already displayed the unavailable image
+    if(lastDisplayedMode != DISPLAY_MODE_UNAVAILABLE) {
+      showUnavailableImage(stopURL, "Data stale");
+      lastDisplayedMode = DISPLAY_MODE_UNAVAILABLE;
+    }
   }
 }
 
