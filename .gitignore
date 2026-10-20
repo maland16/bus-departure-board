@@ -1,2 +1,3 @@
 venv/*
 src/departure-board/credentials.h
+src/credentials-dev.h
