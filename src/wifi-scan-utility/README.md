@@ -1,0 +1,1 @@
+This code makes it easy to profile wifi networks to see what's coming in strong at a certain location.
