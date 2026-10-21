@@ -42,3 +42,4 @@ graph TD;
     - Attach all other bits to the backplane so it can be swapped out easily if needed
 - Cellular connectivity
 - Use [powerfeather ESP32](https://powerfeather.dev/)
+- OTA updates, versioning

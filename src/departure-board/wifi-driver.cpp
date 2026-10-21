@@ -10,9 +10,12 @@ WiFiMulti wifiMulti;
 
 void initWifi()
 {
-  wifiMulti.addAP(PRIMARY_WIFI_SSID, PRIMARY_WIFI_PASSWORD);
-  wifiMulti.addAP(SECONDARY_WIFI_SSID, SECONDARY_WIFI_PASSWORD);
-  wifiMulti.addAP(TERTIARY_WIFI_SSID, TERTIARY_WIFI_PASSWORD);
+  // Copilot came up with these next few lines, it looks a little weird 
+  // but it solves the problem of not having to add a new line here every
+  // time we want to add wifi credentials
+  #define WIFI_CREDENTIALS_ENTRY(ssid, password) wifiMulti.addAP(ssid, password);
+  WIFI_CREDENTIALS(WIFI_CREDENTIALS_ENTRY);
+  #undef WIFI_CREDENTIALS_ENTRY
 
   DEBUG_PRINTLN("Initializing Wifi...");
 

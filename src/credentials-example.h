@@ -4,12 +4,10 @@
 #define SERIAL_NUMBER "001"
 #define CONFIGURED_STOP_ID "1117"
 
-#define PRIMARY_WIFI_SSID ("your_ssid_here")
-#define PRIMARY_WIFI_PASSWORD ("your_password_here")
-#define SECONDARY_WIFI_SSID ("your_secondary_ssid_here")
-#define SECONDARY_WIFI_PASSWORD ("your_secondary_password_here")
-#define TERTIARY_WIFI_SSID ("your_tertiary_ssid_here")
-#define TERTIARY_WIFI_PASSWORD ("your_tertiary_password_here")
+#define WIFI_CREDENTIALS(X) \
+  X("your_ssid_here", "your_password_here") \
+  X("your_secondary_ssid_here", "your_secondary_password_here") \
+  X("your_tertiary_ssid_here", "your_tertiary_password_here")
 
 #define INFLUX_DB_URL "https://prometheus-prod-56-prod-us-east-2.grafana.net/api/v1/push/influx/write"
 #define GC_USER "your_grafana_user_id"
