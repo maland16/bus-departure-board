@@ -4,9 +4,17 @@
 #include "rtc-driver.h"
 
 #define WIFI_CLIENT_TIMEOUT_SEC (5)
+// WiFiMulti's default is 5s, which a weak signal or slow DHCP can exceed
+#define WIFI_CONNECT_TIMEOUT_MS (10000)
 
 WiFiClientSecure client;
 WiFiMulti wifiMulti;
+
+// Saved in RTC memory so we can back off while wifi is down
+RTC_DATA_ATTR uint8_t consecutiveWifiFailures = 0;
+// How many wake-ups in a row failed to connect before this one, reported in
+// telemetry so outages show up once we're back online
+uint8_t wifiFailuresBeforeConnect = 0;
 
 void initWifi()
 {
@@ -21,16 +29,28 @@ void initWifi()
 
   refreshWifiConnection();
 
+  if (isWifiConnected()) {
+    wifiFailuresBeforeConnect = consecutiveWifiFailures;
+    consecutiveWifiFailures = 0;
+  } else if (consecutiveWifiFailures < UINT8_MAX) {
+    consecutiveWifiFailures++;
+  }
+
   client.setCACert(web_cert);
 
   client.setTimeout(WIFI_CLIENT_TIMEOUT_SEC);
+}
+
+bool isWifiConnected()
+{
+  return WiFi.status() == WL_CONNECTED;
 }
 
 void refreshWifiConnection()
 {
   if (WiFi.status() != WL_CONNECTED){
     // .run() connects to the strongest wifi on the list
-    if (wifiMulti.run() == WL_CONNECTED)
+    if (wifiMulti.run(WIFI_CONNECT_TIMEOUT_MS) == WL_CONNECTED)
     {
       Serial.print("Wifi Status: ");
       Serial.println(WiFi.status());

@@ -2,6 +2,7 @@
 #include "rtc-driver.h"
 
 #define CLOCK_TIMEZONE ("EST5EDT,M3.2.0,M11.1.0")
+#define NTP_SYNC_TIMEOUT_MS (10000)
 
 ESP32Time rtc(0);
 RTC_DATA_ATTR bool rtcValid = false; // Save in RTC memory so it persists across deep sleep cycles
@@ -22,14 +23,7 @@ void initClock()
 
 void updateRTCFromNPT()
 {
-  unsigned long time = 0;
-  uint8_t timeout = 10;
-
-  do {
-    time = getEpochTimeFromNPT();
-    timeout--;
-    delay(100);
-  } while(time == 0 && timeout > 0);
+  const unsigned long time = getEpochTimeFromNPT();
 
   if (time != 0) {
     rtc.setTime(time);
@@ -45,7 +39,8 @@ unsigned long getEpochTimeFromNPT()
 {
   time_t now;
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
+  // getLocalTime() polls until the time looks valid or the timeout expires
+  if (!getLocalTime(&timeinfo, NTP_SYNC_TIMEOUT_MS)) {
     return(0);
   }
   time(&now);

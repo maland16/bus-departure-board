@@ -1,6 +1,5 @@
 #define ENABLE_GxEPD2_GFX 0
 #define DEBUG_MODE
-#define configCHECK_FOR_STACK_OVERFLOW 2
 
 #include <ESP32Time.h>
 #include <esp_task_wdt.h>
@@ -32,6 +31,14 @@
 // How long should we wait before considering the data on the display to be too stale
 #define DISPLAY_STALE_SECONDS (30 * 60)
 
+// Back off how often we wake up while wifi is down, to save battery.
+// The first few failures retry quickly in case it was just a blip.
+#define WIFI_FAILURES_BEFORE_SHORT_BACKOFF (3)
+#define WIFI_FAILURES_BEFORE_LONG_BACKOFF (6)
+#define REFRESH_INTERVAL_MINUTES (1)
+#define SHORT_BACKOFF_MINUTES (5)
+#define LONG_BACKOFF_MINUTES (15)
+
 RTC_DATA_ATTR DisplayMode lastDisplayedMode = DISPLAY_MODE_NONE;
 RTC_DATA_ATTR uint32_t lastDisplayUpdateEpoch = 0;
 
@@ -44,6 +51,16 @@ bool isNightTime(void) {
   const int wakeMinuteOfDay = (WAKE_UP_TIME_HOUR * 60);
 
   return currentMinuteOfDay >= sleepMinuteOfDay || currentMinuteOfDay < wakeMinuteOfDay;
+}
+
+uint32_t getRefreshIntervalMinutes(void) {
+  if (consecutiveWifiFailures >= WIFI_FAILURES_BEFORE_LONG_BACKOFF) {
+    return LONG_BACKOFF_MINUTES;
+  }
+  if (consecutiveWifiFailures >= WIFI_FAILURES_BEFORE_SHORT_BACKOFF) {
+    return SHORT_BACKOFF_MINUTES;
+  }
+  return REFRESH_INTERVAL_MINUTES;
 }
 
 void setup() {
@@ -70,6 +87,7 @@ void setup() {
   initDisplayDriver();
 
   // If battery voltage is too low, go to sleep and hope for sun
+  // Must happen before initWifi(), see initBatteryDriver()
   initBatteryDriver();
   printVoltages();
   if (isBatteryBelowCutoffVoltage()) {
@@ -78,8 +96,12 @@ void setup() {
 
   initWifi();
 
-  DEBUG_PRINTLN("Waiting for NTP time sync");
-  updateRTCFromNPT();
+  if (isWifiConnected()) {
+    DEBUG_PRINTLN("Waiting for NTP time sync");
+    updateRTCFromNPT();
+  } else {
+    Serial.printf("No wifi (%u consecutive failures); skipping NTP sync\n", consecutiveWifiFailures);
+  }
 
   // If we have a good RTC time and it's night time, display nighttime image
   if (getRTCValid() && isNightTime()) {
@@ -92,7 +114,7 @@ void setup() {
 
   sendTelemetryWithRetries();
 
-  deepSleepForMinutes(1);
+  deepSleepForMinutes(getRefreshIntervalMinutes());
 }
 
 /**
@@ -148,19 +170,25 @@ void nightTimeDisplayHelper(void) {
 }
 
 void updateDisplay(void) {
-  const uint32_t timeSinceLastDisplayUpdate = getTimeSinceLastUpdate();
+  bool displayedImageSuccessfully = false;
 
-  esp_task_wdt_add(NULL); // Start & 
-  esp_task_wdt_reset();   // feed watchdog in case things get weird
-  bool displayedImageSuccessfully = drawBmpFromUrl(stopBMPURL);
-  esp_task_wdt_delete(NULL);
+  if (isWifiConnected()) {
+    esp_task_wdt_add(NULL); // Start &
+    esp_task_wdt_reset();   // feed watchdog in case things get weird
+    displayedImageSuccessfully = drawBmpFromUrl(stopBMPURL);
+    esp_task_wdt_delete(NULL);
+  } else {
+    Serial.println("No wifi; skipping image download");
+  }
 
   if (displayedImageSuccessfully) {
     Serial.println("Image displayed successfully");
     lastDisplayedMode = DISPLAY_MODE_LIVE_DATA;
     lastDisplayUpdateEpoch = rtc.getEpoch();
+    return;
   }
 
+  const uint32_t timeSinceLastDisplayUpdate = getTimeSinceLastUpdate();
   if (lastDisplayUpdateEpoch != 0 && timeSinceLastDisplayUpdate > DISPLAY_STALE_SECONDS) {
     Serial.printf("Last successful display update was %lu seconds ago; showing unavailable image.\n",
                   (unsigned long)timeSinceLastDisplayUpdate);

@@ -27,6 +27,12 @@ static String escapeTag(const String& in) {
 static float sane(float v) { return isfinite(v) ? v : -1.0f; }
 
 void sendTelemetryWithRetries(void) {
+  // Retrying can't help without wifi, so don't burn battery waiting
+  if (!isWifiConnected()) {
+    Serial.println("No wifi; skipping telemetry");
+    return;
+  }
+
   int retries = 0;
   while (!sendTelemetry() && retries < TELEMETRY_RETRIES) {
     Serial.println("Telemetry failed; retrying in 3 seconds");
@@ -40,7 +46,7 @@ void sendTelemetryWithRetries(void) {
 }
 
 bool sendTelemetry() {
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (!isWifiConnected()) return false;
 
   float solarV   = sane(getSolarVoltage());
   float batteryV = sane(getBatteryVoltage());
@@ -55,12 +61,14 @@ bool sendTelemetry() {
   int n = snprintf(body, sizeof(body),
     "diagnostics,device=%s "
       "solar_v=%.3f,battery_v=%.3f,rssi=%di,display_mode=%di,reset_reason=%di,"
-      "time_since_last_update_s=%lu,heap_free=%ui,heap_min=%ui,uptime_s=%lldi\n"
+      "time_since_last_update_s=%lu,heap_free=%ui,heap_min=%ui,uptime_s=%lldi,"
+      "wifi_failures_before_connect=%ui\n"
     "network,device=%s,ssid=%s connected=1i",
     GRAFANA_DEVICE,
     solarV, batteryV, WiFi.RSSI(), mode, (int)esp_reset_reason(),
     (unsigned long)staleSeconds,
     (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(), uptimeS,
+    (unsigned)wifiFailuresBeforeConnect,
     GRAFANA_DEVICE, ssid.c_str());
 
   if (n < 0 || n >= (int)sizeof(body)) {
