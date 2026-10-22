@@ -8,7 +8,7 @@
 #define BATTERY_DIVIDER_TOP_OHMS (100000.0f)
 #define BATTERY_DIVIDER_BOTTOM_OHMS (100000.0f)
 
-#define BATTERY_CUTOFF_VOLTAGE (2.4f)
+#define BATTERY_CUTOFF_VOLTAGE (2.7f)
 
 // A0/A1 on the ESP32-S3 Feather are ADC2 pins, which can't be read reliably
 // while wifi is running. Sample once in initBatteryDriver() (before wifi comes

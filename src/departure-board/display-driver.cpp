@@ -6,6 +6,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ESP32Time.h>
+#include <esp_rom_crc.h>
 
 #include <Fonts/FreeMonoBold9pt7b.h>
 #include <Fonts/FreeMonoBold12pt7b.h>
@@ -41,6 +42,12 @@ static const size_t MAX_BMP_ROW_BYTES = ((uint32_t)PANEL_WIDTH * 24 + 31) / 32 *
 static uint8_t framebuffer[FRAMEBUFFER_SIZE];
 static uint8_t bmpRowBuf[MAX_BMP_ROW_BYTES];
 static bool blackTable[256]; // palette-index -> "is this black?" lookup for 1/8bpp BMPs
+
+// CRC32 of the image currently on the panel, saved across deep sleep so we can
+// skip refreshing when the downloaded image hasn't changed. Cleared whenever
+// something else is drawn over the live image.
+RTC_DATA_ATTR static uint32_t lastFramebufferCrc = 0;
+RTC_DATA_ATTR static bool lastFramebufferCrcValid = false;
 
 void initDisplayDriver()
 {
@@ -134,6 +141,9 @@ void showUnavailableImage(const char *url, const char *reason) {
   } while (display.nextPage());
 
   display.hibernate();
+
+  // The live image is no longer on the panel, so the next one must be drawn
+  lastFramebufferCrcValid = false;
 }
 
 bool drawBmpFromUrl(const char *url) {
@@ -325,9 +335,21 @@ bool drawBmpFromUrl(const char *url) {
     return false;
   }
 
+  // E-ink holds its image without power, so if nothing changed skip the
+  // refresh and save the power (and panel wear)
+  const uint32_t framebufferCrc = esp_rom_crc32_le(0, framebuffer, FRAMEBUFFER_SIZE);
+  if (lastFramebufferCrcValid && framebufferCrc == lastFramebufferCrc) {
+    Serial.println("Image unchanged since last refresh; skipping display update");
+    display.hibernate();
+    return true;
+  }
+
   display.writeImage(framebuffer, 0, 0, PANEL_WIDTH, PANEL_HEIGHT); // flip to writeImage(..., true) if colors look inverted
 
   display.refresh();
+
+  lastFramebufferCrc = framebufferCrc;
+  lastFramebufferCrcValid = true;
 
   Serial.println("Image drawn");
 
