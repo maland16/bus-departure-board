@@ -10,6 +10,7 @@
 #include <esp_timer.h>
 
 #define TELEMETRY_RETRIES 3
+#define TELEMETRY_RETRY_DELAY_MS 3000
 
 // Escape characters that are special in line-protocol tag values
 static String escapeTag(const String& in) {
@@ -33,16 +34,20 @@ void sendTelemetryWithRetries(void) {
     return;
   }
 
-  int retries = 0;
-  while (!sendTelemetry() && retries < TELEMETRY_RETRIES) {
-    Serial.println("Telemetry failed; retrying in 3 seconds");
-    delay(3000);
-    retries++;
+  // One initial attempt plus TELEMETRY_RETRIES retries
+  for (int attempt = 0; attempt <= TELEMETRY_RETRIES; attempt++) {
+    if (sendTelemetry()) {
+      Serial.println("Telemetry sent successfully");
+      return;
+    }
+
+    if (attempt < TELEMETRY_RETRIES) {
+      Serial.println("Telemetry failed; retrying in 3 seconds");
+      delay(TELEMETRY_RETRY_DELAY_MS);
+    }
   }
 
-  if (retries != TELEMETRY_RETRIES) {
-    Serial.println("Telemetry sent successfully");
-  }
+  Serial.printf("Telemetry failed after %d attempts; giving up\n", TELEMETRY_RETRIES + 1);
 }
 
 bool sendTelemetry() {

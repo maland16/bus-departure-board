@@ -53,7 +53,7 @@ void initDisplayDriver()
     http.setReuse(false);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // in case the file is served via a CDN/redirect
     http.setTimeout(8000);
-    DEBUG_PRINTLN("Display initialized");
+    Serial.println("Display initialized");
 }
 
 // ---- Blocking read of exactly `len` bytes from any Stream, with a stall timeout ----
@@ -158,10 +158,6 @@ bool drawBmpFromUrl(const char *url) {
   heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
   heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
-  if (!heap_caps_check_integrity_all(true)) {
-    Serial.println("HEAP CORRUPTED before http.GET()");
-  }
-
   int httpCode = http.GET();
   if (httpCode != HTTP_CODE_OK) {
     Serial.printf("HTTP GET failed: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
@@ -169,10 +165,6 @@ bool drawBmpFromUrl(const char *url) {
     return false;
   } else {
     Serial.printf("HTTP GET succeeded: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
-  }
-
-  if (!heap_caps_check_integrity_all(true)) {
-    Serial.println("HEAP CORRUPTED after http.GET()");
   }
 
   WiFiClient *stream = http.getStreamPtr();
@@ -327,15 +319,7 @@ bool drawBmpFromUrl(const char *url) {
   }
   Serial.println(" download complete, closing HTTP connection");
 
-  if (!heap_caps_check_integrity_all(true)) {
-    Serial.println("HEAP CORRUPTED right before http.end()");
-  }
-
   http.end();
-
-  if (!heap_caps_check_integrity_all(true)) {
-    Serial.println("HEAP CORRUPTED right after http.end()");
-  }
 
   if (!ok) {
     return false;
@@ -348,10 +332,6 @@ bool drawBmpFromUrl(const char *url) {
   Serial.println("Image drawn");
 
   display.hibernate();
-
-  if (!heap_caps_check_integrity_all(true)) {
-    Serial.println("HEAP CORRUPTED end of display function");
-  }
 
   Serial.printf("stack high water mark (end of display loop): %u bytes free\n", uxTaskGetStackHighWaterMark(NULL));
   return true;

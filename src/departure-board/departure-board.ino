@@ -1,5 +1,4 @@
 #define ENABLE_GxEPD2_GFX 0
-#define DEBUG_MODE
 
 #include <ESP32Time.h>
 #include <esp_task_wdt.h>
@@ -76,7 +75,6 @@ void setup() {
   // put your setup code here, to run once:
   Serial.begin(SERIAL_BAUD);
   delay(1000); // Give time for Serial to initialize, and serial client to innumerate the port and connect
-  DEBUG_PRINTLN("Serial Initialized");
   Serial.println("--- DEPARTURE BOARD STARTUP ---");
 
   initClock();
@@ -97,8 +95,16 @@ void setup() {
   initWifi();
 
   if (isWifiConnected()) {
-    DEBUG_PRINTLN("Waiting for NTP time sync");
+    Serial.println("Waiting for NTP time sync");
+    const bool rtcWasValid = getRTCValid();
     updateRTCFromNPT();
+
+    // If this is the first successful sync since power-on, the clock just
+    // jumped from ~1970 to the real time, so a display timestamp recorded
+    // before the sync would look decades stale. Restamp it on the new clock.
+    if (!rtcWasValid && getRTCValid() && lastDisplayUpdateEpoch != 0) {
+      lastDisplayUpdateEpoch = rtc.getEpoch();
+    }
   } else {
     Serial.printf("No wifi (%u consecutive failures); skipping NTP sync\n", consecutiveWifiFailures);
   }

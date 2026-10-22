@@ -25,7 +25,7 @@ void initWifi()
   WIFI_CREDENTIALS(WIFI_CREDENTIALS_ENTRY);
   #undef WIFI_CREDENTIALS_ENTRY
 
-  DEBUG_PRINTLN("Initializing Wifi...");
+  Serial.println("Initializing Wifi...");
 
   refreshWifiConnection();
 
@@ -61,7 +61,7 @@ void refreshWifiConnection()
       Serial.print("IP address: ");
       Serial.println(WiFi.localIP());
     } else {
-      ERROR_PRINTLN("Failed to connect to wifi!");
+      Serial.println("Failed to connect to wifi!");
       Serial.print("Wifi Status: ");
       Serial.println(WiFi.status());
     }
