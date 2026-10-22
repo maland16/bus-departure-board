@@ -2,3 +2,4 @@ venv/*
 src/departure-board/credentials.h
 src/credentials-dev.h
 src/departure-board/git-version.h
+src/departure-board/build/

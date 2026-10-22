@@ -87,29 +87,6 @@ extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskNa
     }
 }
 
-/*
-// Registers the current task with the ESP-IDF task watchdog and sets a
-// hard reboot ceiling. Call this ONCE from setup(), from whichever task
-// will call drawBmpFromUrl() (the default Arduino loop task if that's
-// where you call it from). This is a last-resort safety net: if the
-// device ever blocks indefinitely somewhere below our own timeouts (a
-// stale connection, a stuck TLS handshake, a wedged driver call), the
-// watchdog reboots it rather than hanging forever silently.
-void initTaskWatchdog() {
-#if ESP_IDF_VERSION_MAJOR >= 5
-  esp_task_wdt_config_t twdtConfig = {
-    .timeout_ms = APP_WDT_TIMEOUT_S * 1000,
-    .idle_core_mask = 0,
-    .trigger_panic = true,
-  };
-  esp_task_wdt_init(&twdtConfig);
-#else
-  esp_task_wdt_init(APP_WDT_TIMEOUT_S, true ); // panic (reboot) on timeout
-#endif
-  esp_task_wdt_add(NULL); // subscribe the calling task
-}
-*/
-
 #define RESET_STATS_MAGIC (0xB05B0A2DUL)
 
 // RTC_NOINIT_ATTR, unlike RTC_DATA_ATTR, isn't re-initialized after a crash or

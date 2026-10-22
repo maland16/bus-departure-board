@@ -105,6 +105,7 @@ bool sendTelemetry() {
 
   WiFiClientSecure client;
   client.setInsecure();  // same trade-off as discussed earlier
+  client.setHandshakeTimeout(10); // seconds, the 120s default can stall a wake-up for minutes
   HTTPClient http;
   http.setTimeout(5000);
   http.begin(client, INFLUX_DB_URL);
