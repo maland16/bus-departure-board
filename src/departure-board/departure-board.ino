@@ -103,9 +103,10 @@ void setup() {
     Serial.printf("No wifi (%u consecutive failures); skipping NTP sync\n", consecutiveWifiFailures);
   }
 
-  // If we have a good RTC time and it's night time, display nighttime image
+  // If we have a good RTC time and it's night time, sleep until morning. The
+  // last image of the day shows the next morning's busses, so leave it up.
   if (getRTCValid() && isNightTime()) {
-    nightTimeDisplayHelper();
+    nightTimeSleepHelper();
     // this^ call puts us to sleep for the night, so nothing below is reached
   }
 
@@ -137,15 +138,7 @@ void lowBatteryHelper(void) {
   deepSleepForMinutes(30);
 }
 
-void nightTimeDisplayHelper(void) {
-
-  if (lastDisplayedMode != DISPLAY_MODE_NIGHTTIME) {
-    Serial.println("Nighttime display not active; displaying nighttime image.");
-    lastDisplayedMode = DISPLAY_MODE_NIGHTTIME;
-  } else {
-    Serial.println("Nighttime display already active");
-  }
-
+void nightTimeSleepHelper(void) {
   Serial.println("It's night time! Sleeping until the wake-up hour.");
 
   sendTelemetryWithRetries();

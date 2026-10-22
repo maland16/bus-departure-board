@@ -7,7 +7,7 @@
 enum DisplayMode {
   DISPLAY_MODE_NONE = 0,
   DISPLAY_MODE_LIVE_DATA = 1,
-  DISPLAY_MODE_NIGHTTIME = 2,
+  DISPLAY_MODE_NIGHTTIME = 2, // No longer used, kept so the Grafana value mapping stays correct
   DISPLAY_MODE_UNAVAILABLE = 3,
 };
 
