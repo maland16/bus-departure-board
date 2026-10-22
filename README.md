@@ -19,6 +19,10 @@ graph TD;
 
 ### [Read more here](docs/electricalTopology.md)
 
+## Display
+
+A Good Display GDEM075T41WT: a 7.5", 800x480 black/white e-paper panel rated for -25°C to 50°C. Specs, firmware notes and wiring are in [docs/display.md](docs/display.md).
+
 ## Physical Layer Options
 - Wifi via ESP32 hardware [ Selected for version 1 ]
     - Advantages: Built into the ESP32 hardware, easy to setup and well supported
