@@ -2,6 +2,9 @@
 
 #include <ESP32Time.h>
 #include <esp_task_wdt.h>
+#if ARDUINO_USB_MODE == 0
+#include <USB.h>
+#endif
 
 #include <WiFi.h>
 #include <WiFiClient.h>
@@ -11,15 +14,21 @@
 
 #include "battery-driver.h"
 #include "credentials.h"
-#include "debug-print.h"
 #include "deep-sleep-driver.h"
 #include "display-driver.h"
 #include "rtc-driver.h"
 #include "task-supervisor.h"
 #include "wifi-driver.h"
 #include "telemetry.h"
+#include "wake-stats.h"
 
 #define SERIAL_BAUD (115200)
+
+// USB re-enumerates on every wake-up, so give the host a moment to mount it
+// before deciding we're on battery. Both are measured from boot (millis()).
+// Tune USB_MOUNT_GRACE_MS from the "USB mounted after" log line.
+#define USB_MOUNT_GRACE_MS (300)
+#define SERIAL_MONITOR_WAIT_MS (1500)
 
 // When to stop/start fetching live data
 #define WAKE_UP_TIME_HOUR (4) // 4AM
@@ -52,6 +61,32 @@ bool isNightTime(void) {
   return currentMinuteOfDay >= sleepMinuteOfDay || currentMinuteOfDay < wakeMinuteOfDay;
 }
 
+/**
+ * Wait for a serial monitor to connect, but only if we're plugged into a
+ * computer. In the field USB never mounts, so this costs USB_MOUNT_GRACE_MS
+ * instead of a fixed delay on every wake-up.
+ */
+void waitForSerialMonitor(void) {
+#if ARDUINO_USB_MODE == 0 // USB-OTG (TinyUSB), the Feather's default
+  while (!USB && millis() < USB_MOUNT_GRACE_MS) {
+    delay(5);
+  }
+  if (!USB) {
+    return; // not plugged into a computer
+  }
+  const uint32_t usbMountedMs = millis();
+
+  while (!Serial && millis() < SERIAL_MONITOR_WAIT_MS) {
+    delay(5);
+  }
+  Serial.printf("USB mounted after %lu ms, serial monitor %s after %lu ms\n",
+                (unsigned long)usbMountedMs, Serial ? "connected" : "not connected",
+                (unsigned long)millis());
+#else
+  delay(1000); // Hardware CDC mode, just give the serial client time to connect
+#endif
+}
+
 uint32_t getRefreshIntervalMinutes(void) {
   if (consecutiveWifiFailures >= WIFI_FAILURES_BEFORE_LONG_BACKOFF) {
     return LONG_BACKOFF_MINUTES;
@@ -74,13 +109,14 @@ void setup() {
 
   // put your setup code here, to run once:
   Serial.begin(SERIAL_BAUD);
-  delay(1000); // Give time for Serial to initialize, and serial client to innumerate the port and connect
+  waitForSerialMonitor();
   Serial.println("--- DEPARTURE BOARD STARTUP ---");
 
   initClock();
 
   esp_reset_reason_t r = esp_reset_reason();
   printResetReason(r);
+  recordResetReason(r);
 
   initDisplayDriver();
 
@@ -97,7 +133,9 @@ void setup() {
   if (isWifiConnected()) {
     Serial.println("Waiting for NTP time sync");
     const bool rtcWasValid = getRTCValid();
+    const uint32_t ntpStartMs = millis();
     updateRTCFromNPT();
+    wakeStats.ntpMs = millis() - ntpStartMs;
 
     // If this is the first successful sync since power-on, the clock just
     // jumped from ~1970 to the real time, so a display timestamp recorded

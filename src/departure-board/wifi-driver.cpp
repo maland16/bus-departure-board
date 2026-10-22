@@ -1,7 +1,7 @@
 #include "wifi-driver.h"
 #include "credentials.h"
-#include "debug-print.h"
 #include "rtc-driver.h"
+#include "wake-stats.h"
 
 #define WIFI_CLIENT_TIMEOUT_SEC (5)
 // WiFiMulti's default is 5s, which a weak signal or slow DHCP can exceed
@@ -27,7 +27,9 @@ void initWifi()
 
   Serial.println("Initializing Wifi...");
 
+  const uint32_t connectStartMs = millis();
   refreshWifiConnection();
+  wakeStats.wifiConnectMs = millis() - connectStartMs;
 
   if (isWifiConnected()) {
     wifiFailuresBeforeConnect = consecutiveWifiFailures;

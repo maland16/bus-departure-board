@@ -14,6 +14,10 @@ enum DisplayMode {
 extern DisplayMode lastDisplayedMode;
 extern uint32_t lastDisplayUpdateEpoch;
 
+// How long the previous wake-up was awake for, measured right before it went
+// to sleep (so it includes sending telemetry, unlike millis() during this one)
+extern uint32_t previousWakeAwakeMs;
+
 uint32_t getTimeSinceLastUpdate(void);
 
 /**

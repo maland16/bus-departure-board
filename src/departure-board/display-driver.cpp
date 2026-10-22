@@ -16,9 +16,9 @@
 
 #include "src/third-party/QRCode/src/rm_qrcode.h"
 
-#include "debug-print.h"
 #include "wifi-driver.h"
 #include "rtc-driver.h"
+#include "wake-stats.h"
 
 #define BITMAP_SIGNATURE (0x4D42) // "BM" in hex
 #define MAX_EXPECTED_HEADER_POSITION_BYTES (50)
@@ -119,6 +119,7 @@ void showUnavailableImage(const char *url, const char *reason) {
   const int textCx = panelW / 2;
   const int textStartY = qrY + qrPx + 72;
 
+  const uint32_t refreshStartMs = millis();
   display.firstPage();
   do {
     display.fillScreen(GxEPD_WHITE);
@@ -139,6 +140,7 @@ void showUnavailableImage(const char *url, const char *reason) {
     drawCentered(reason, textCx, textStartY + 102);
     drawCentered("Scan for bus tracking info", textCx, textStartY + 136);
   } while (display.nextPage());
+  wakeStats.refreshMs = millis() - refreshStartMs;
 
   display.hibernate();
 
@@ -146,14 +148,16 @@ void showUnavailableImage(const char *url, const char *reason) {
   lastFramebufferCrcValid = false;
 }
 
-bool drawBmpFromUrl(const char *url) {
-  Serial.printf("stack high water mark (beginning of display loop): %u bytes free\n", uxTaskGetStackHighWaterMark(NULL));
-
+// Download the BMP at `url` and convert it into `framebuffer`. On failure,
+// sets wakeStats.displayResult to BAD_IMAGE if the server sent something we
+// can't use; otherwise the caller's DOWNLOAD_FAILED stands.
+static bool downloadBmpToFramebuffer(const char *url) {
   client.setInsecure();
 
   if (display.width() != PANEL_WIDTH || display.height() != PANEL_HEIGHT) {
     Serial.printf("Display reports %dx%d, expected native %ux%u - check setRotation(0)\n",
                   display.width(), display.height(), PANEL_WIDTH, PANEL_HEIGHT);
+    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
     return false;
   }
 
@@ -169,6 +173,7 @@ bool drawBmpFromUrl(const char *url) {
   heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
   int httpCode = http.GET();
+  wakeStats.httpCode = httpCode;
   if (httpCode != HTTP_CODE_OK) {
     Serial.printf("HTTP GET failed: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
     http.end();
@@ -195,6 +200,7 @@ bool drawBmpFromUrl(const char *url) {
   }
   if (fileHeader[0] != 'B' || fileHeader[1] != 'M') {
     Serial.println("Not a BMP file (missing 'BM' signature)");
+    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
     http.end();
     return false;
   }
@@ -223,17 +229,20 @@ bool drawBmpFromUrl(const char *url) {
 
   if (compression != 0) {
     Serial.println("Only uncompressed (BI_RGB) BMPs are supported");
+    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
     http.end();
     return false;
   }
   if (bpp != 1 && bpp != 8 && bpp != 24) {
     Serial.printf("Unsupported bit depth: %u (only 1, 8, or 24 bpp supported)\n", bpp);
+    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
     http.end();
     return false;
   }
   if ((uint32_t)bmpWidth != PANEL_WIDTH || bmpHeight != PANEL_HEIGHT) {
     Serial.printf("BMP size (%ldx%lu) does not match expected %ux%u - aborting\n",
                   (long)bmpWidth, (unsigned long)bmpHeight, PANEL_WIDTH, PANEL_HEIGHT);
+    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
     http.end();
     return false;
   }
@@ -277,6 +286,7 @@ bool drawBmpFromUrl(const char *url) {
     // Can't happen with PANEL_WIDTH=800 and bpp in {1,8,24}, but guard anyway
     // since bmpRowBuf is a fixed-size static buffer.
     Serial.println("BMP row too large for static row buffer");
+    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
     http.end();
     return false;
   }
@@ -331,7 +341,18 @@ bool drawBmpFromUrl(const char *url) {
 
   http.end();
 
-  if (!ok) {
+  return ok;
+}
+
+bool drawBmpFromUrl(const char *url) {
+  Serial.printf("stack high water mark (beginning of display loop): %u bytes free\n", uxTaskGetStackHighWaterMark(NULL));
+
+  wakeStats.displayResult = DISPLAY_RESULT_DOWNLOAD_FAILED;
+  const uint32_t downloadStartMs = millis();
+  const bool downloaded = downloadBmpToFramebuffer(url);
+  wakeStats.downloadMs = millis() - downloadStartMs;
+
+  if (!downloaded) {
     return false;
   }
 
@@ -340,13 +361,17 @@ bool drawBmpFromUrl(const char *url) {
   const uint32_t framebufferCrc = esp_rom_crc32_le(0, framebuffer, FRAMEBUFFER_SIZE);
   if (lastFramebufferCrcValid && framebufferCrc == lastFramebufferCrc) {
     Serial.println("Image unchanged since last refresh; skipping display update");
+    wakeStats.displayResult = DISPLAY_RESULT_UNCHANGED;
     display.hibernate();
     return true;
   }
 
+  const uint32_t refreshStartMs = millis();
   display.writeImage(framebuffer, 0, 0, PANEL_WIDTH, PANEL_HEIGHT); // flip to writeImage(..., true) if colors look inverted
 
   display.refresh();
+  wakeStats.refreshMs = millis() - refreshStartMs;
+  wakeStats.displayResult = DISPLAY_RESULT_REFRESHED;
 
   lastFramebufferCrc = framebufferCrc;
   lastFramebufferCrcValid = true;
