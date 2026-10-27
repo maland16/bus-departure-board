@@ -18,8 +18,11 @@
 #define FW_GIT_HASH "unknown"
 #endif
 
-#define TELEMETRY_RETRIES 3
-#define TELEMETRY_RETRY_DELAY_MS 3000
+// Telemetry goes out every wake-up, so losing one is cheap. Waiting through
+// several stalled attempts is not: retries were ~30% of all awake time.
+#define TELEMETRY_RETRIES 1
+#define TELEMETRY_RETRY_DELAY_MS 1000
+#define TELEMETRY_HANDSHAKE_TIMEOUT_SEC 5
 
 WakeStats wakeStats = {};
 
@@ -53,7 +56,7 @@ void sendTelemetryWithRetries(void) {
     }
 
     if (attempt < TELEMETRY_RETRIES) {
-      Serial.println("Telemetry failed; retrying in 3 seconds");
+      Serial.printf("Telemetry failed; retrying in %d ms\n", TELEMETRY_RETRY_DELAY_MS);
       delay(TELEMETRY_RETRY_DELAY_MS);
     }
   }
@@ -105,7 +108,7 @@ bool sendTelemetry() {
 
   WiFiClientSecure client;
   client.setInsecure();  // same trade-off as discussed earlier
-  client.setHandshakeTimeout(10); // seconds, the 120s default can stall a wake-up for minutes
+  client.setHandshakeTimeout(TELEMETRY_HANDSHAKE_TIMEOUT_SEC); // the 120s default can stall a wake-up for minutes
   HTTPClient http;
   http.setTimeout(5000);
   http.begin(client, INFLUX_DB_URL);

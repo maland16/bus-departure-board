@@ -88,6 +88,13 @@ void initWifi()
   // Don't write the wifi config to flash on every wake-up
   WiFi.persistent(false);
 
+  // Experiment: wifi power save (modem sleep) is known to cause stalled TCP
+  // transfers on the ESP32 with a mediocre signal, and ~7% of downloads were
+  // stalling. We're only awake a few seconds, so the extra current is small.
+  // Compare download failures (display_result = 3) before/after; delete this
+  // line to revert.
+  WiFi.setSleep(false);
+
   for (int i = 0; i < wifiCredentialCount; i++) {
     wifiMulti.addAP(wifiCredentials[i].ssid, wifiCredentials[i].password);
   }
