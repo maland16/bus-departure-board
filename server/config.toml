@@ -1,0 +1,42 @@
+# Stop codes as shown on the bus stop sign (GTFS stop_code, e.g. 1117 -> stop_id "0:1117").
+# Codes missing from the static feed are skipped (and shown as missing) until they appear.
+# 131 isn't in GP Metro's feed or on UCOP as of 2026-11-06.
+stops = ["1117", "1131", "1054", "372", "132", "175", "168", "118", "136", "131"]
+
+# Relative paths are relative to this file
+data_dir = "data"
+
+[feeds]
+static_url = "https://gtfs.gptd.cadavl.com/GPTD/GTFS/GTFS_GPTD.zip"
+trip_updates_url = "https://gtfsrt.gptd.cadavl.com/ProfilGtfsRt2_0RSProducer-GPTD/TripUpdate.pb"
+vehicle_positions_url = "https://gtfsrt.gptd.cadavl.com/ProfilGtfsRt2_0RSProducer-GPTD/VehiclePosition.pb"
+# The static zip is rebuilt nightly (~00:30 local); a conditional GET each hour is cheap
+static_check_interval_s = 3600
+realtime_poll_interval_s = 30
+
+[departures]
+# How far ahead to list departures
+window_ahead_s = 10800
+# Keep showing a departure this long after its estimated time
+past_grace_s = 60
+# Ignore realtime predictions for trips whose vehicle hasn't reported its position in this long
+stale_vehicle_s = 300
+# Rows on the board / in the JSON payload
+board_rows = 8
+
+[ucop]
+base_url = "https://transit.ucop.me"
+display_name = "gdem075t41wt"
+# Kept gentle: one page + one image fetch per interval
+compare_interval_s = 120
+# UCOP shows times truncated to the minute
+match_tolerance_s = 90
+# Comparison rows in data/compare.db (~40 rows per stop per snapshot)
+retention_days = 14
+
+[logging]
+# Inputs of every comparison (realtime feeds + UCOP pages, gzipped, ~65 MB/day for 10 stops),
+# so `python -m busboard.replay` can re-run them through changed code. Every static feed
+# version is kept too (~2 MB each).
+archive_days = 7
+static_versions_kept = 30

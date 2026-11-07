@@ -1,0 +1,25 @@
+[project]
+name = "busboard"
+version = "0.1.0"
+description = "Builds departure data for the e-ink bus departure board from GP Metro's GTFS feeds, and compares it with UCOP"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "httpx>=0.27",
+    "gtfs-realtime-bindings>=1.0.0",
+    "pillow>=11.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["busboard"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
