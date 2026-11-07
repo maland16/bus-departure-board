@@ -116,3 +116,23 @@ def test_trips_missing_from_one_fetch_are_held():
     assert carry_over_missing_trips({"A": a}, seen, 1030, 120)["B"] is b  # B dropped out briefly
     assert set(carry_over_missing_trips({"A": a}, seen, 1200, 120)) == {"A"}  # gone too long
     assert "B" not in seen
+
+
+def test_estimate_from_bus_position_when_trip_missing_from_trip_updates(index):
+    """Seen 2026-11-07: trips absent from TripUpdates for minutes while their bus ran 8 min late."""
+    from conftest import IN_TRANSIT_TO
+    now = local(2026, 11, 6, 18, 6)
+    # T_STOP scheduled to leave 0:1112 (seq 1) at 18:00; at 18:05:50 its bus is still heading there
+    _, v = parse_vehicle_positions(vehicle_positions({"T_STOP": ("2645", now - 10, "0:1112", IN_TRANSIT_TO)}))
+    d = run(index, RealtimeSnapshot(vehicles_by_trip=v), now=now)["T_STOP", 2]
+    assert (d.src, d.from_vehicle, d.ref_stop_sequence) == (SRC_ORIGIN, True, 1)
+    assert d.est == local(2026, 11, 6, 18, 5) + 350  # 5 min 50 s late at the first stop, carried forward
+
+    # The bus is already past our stop: don't show it on schedule
+    _, v = parse_vehicle_positions(vehicle_positions({"T_STOP": ("2645", now - 10, "0:900", IN_TRANSIT_TO)}))
+    assert ("T_STOP", 2) not in run(index, RealtimeSnapshot(vehicles_by_trip=v), now=now)
+
+    # A ghost bus's position is ignored like its predictions
+    _, v = parse_vehicle_positions(vehicle_positions({"T_STOP": ("2645", now - 3600, "0:1112", IN_TRANSIT_TO)}))
+    d = run(index, RealtimeSnapshot(vehicles_by_trip=v), now=now)["T_STOP", 2]
+    assert d.src == SRC_SCHEDULE and not d.from_vehicle

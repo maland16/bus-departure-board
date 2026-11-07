@@ -20,6 +20,7 @@ from .compare import DIFF_REASONS, EXPECTED_REASONS, CompareStore, compare_stop
 from .config import load_config
 from .observe import DepartureObserver
 from .departures import board_departures, compute_departures
+from .drift import DriftModel
 from .payload import build_payload
 from .publish import Publisher
 from .realtime import RealtimeFeed, RealtimeSnapshot
@@ -36,6 +37,7 @@ static = StaticFeed(cfg.static_url, cfg.data_dir, cfg.stops)
 realtime = RealtimeFeed(cfg.trip_updates_url, cfg.vehicle_positions_url, cfg.realtime_hold_missing_s)
 publisher = Publisher(cfg.publish_target, cfg.publish_public_url, cfg.publish_ssh_key, cfg.data_dir)
 PUBLISHING = cfg.publish_enabled and bool(cfg.publish_target)
+drift = DriftModel(window_s=cfg.drift_window_s) if cfg.drift_correction else None
 store = CompareStore(cfg.data_dir / "compare.db")
 events = EventLog(cfg.data_dir)
 archive = InputArchive(cfg.data_dir)
@@ -88,13 +90,14 @@ def _display_realtime() -> RealtimeSnapshot:
 
 
 def _departures(code: str, now: int, past_grace_s: int | None = None):
-    return compute_departures(
+    deps = compute_departures(
         _index(), _display_realtime(), code, now,
         window_ahead_s=cfg.window_ahead_s,
         past_grace_s=cfg.past_grace_s if past_grace_s is None else past_grace_s,
         stale_vehicle_s=cfg.stale_vehicle_s,
         block_layover_s=cfg.block_layover_s,
     )
+    return drift.correct(_index(), deps, now) if drift else deps
 
 
 def _stop_name(code: str) -> str:
@@ -185,6 +188,10 @@ def _observe_departures():
     if observer is None or observer.stop_ids != set(stop_codes):
         observer = DepartureObserver(set(stop_codes))
     seen = observer.update(idx, realtime.snapshot.vehicles_by_trip)
+    if drift:
+        for o in seen:
+            drift.resolve(o)
+        drift.prune(int(time.time()))
     if seen:
         routes = {o.trip_id: idx.routes[idx.trips[o.trip_id].route_id].short_name
                   for o in seen if o.trip_id in idx.trips and idx.trips[o.trip_id].route_id in idx.routes}
@@ -223,7 +230,7 @@ def _compare_tick():
         t = int(snap.fetched_at)
         no_page = bool(snap.error) and not snap.arrivals
         # Without UCOP's page, still log our departures so they can be scored against actual ones
-        ours, rows = compare_stop(idx, rt_used, None if no_page else snap.arrivals, code, t, cfg)
+        ours, rows = compare_stop(idx, rt_used, None if no_page else snap.arrivals, code, t, cfg, drift)
         if _ucop_error_by_stop.get(code) != snap.error:  # log changes, not every failed fetch
             events.write("ucop_error" if snap.error else "ucop_recovered", stop=code, error=snap.error)
             _ucop_error_by_stop[code] = snap.error
@@ -266,6 +273,10 @@ async def lifespan(_app: FastAPI):
         _on_static_index(None, "startup_cache")
     await asyncio.to_thread(_static_tick)
     await asyncio.to_thread(realtime.refresh)
+    if drift and static.index is not None:
+        # Pick up where the last run left off instead of re-learning for hours after each restart
+        rows = await asyncio.to_thread(store.drift_training, int(time.time()) - cfg.drift_window_s)
+        log.info("drift model warm start: %d samples", drift.warm_start(static.index, rows))
     tasks = [
         asyncio.create_task(_every(cfg.static_check_interval_s, _static_tick, "static refresh")),
         asyncio.create_task(_every(cfg.realtime_poll_interval_s, _realtime_tick, "realtime refresh")),
@@ -366,6 +377,7 @@ def health():
             for code, s in ucop_latest.items()
         },
         "publish": publisher.status() if PUBLISHING else "disabled",
+        "drift": _drift_status(now) if drift and idx else "disabled",
     }
     return JSONResponse(body, status_code=200 if ok else 503)
 
@@ -409,6 +421,12 @@ def _summary_table(s: dict) -> str:
     a, n = col(s["all"]), col(s["near_term"])
     body = "".join(f"<tr><th>{html.escape(l)}</th><td>{x}</td><td>{y}</td></tr>" for l, x, y in zip(labels, a, n))
     return f"<table><tr><th></th><th>All rows</th><th>Due within 15 min</th></tr>{body}</table>"
+
+
+def _drift_status(now: float) -> dict:
+    st = drift.status(static.index, int(now))
+    biggest = sorted(st.items(), key=lambda kv: -abs(kv[1]["shift_at_20min_s"]))[:8]
+    return {"keys": len(st), "largest_shift_at_20min": {k: v["shift_at_20min_s"] for k, v in biggest}}
 
 
 def _publish_line() -> str:

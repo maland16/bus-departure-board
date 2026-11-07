@@ -6,6 +6,10 @@ For each scheduled visit, the first rule that applies sets the estimate:
   src=1  no prediction for this stop: shift the schedule by the delay at the nearest stop that
          has one, preferring an earlier stop (usually the first stop: about half of the trips
          that haven't started only have a prediction for it)
+  src=1  (also) no usable TripUpdate, but the trip's bus is reporting its position: the delay is
+         its last report time minus its scheduled time at the stop it's at or heading to
+         (from_vehicle). Seen: trips missing from TripUpdates for minutes while their bus ran 8 min
+         late. If the bus is already past this stop, the departure is dropped.
   src=0  schedule only
 With block propagation on, a trip without a prediction for this stop also can't start before
 the bus finishes its previous trip on the same block: the estimate is at least the previous
@@ -62,6 +66,8 @@ class Departure:
     ref_stop_sequence: int | None = None  # for src=1: the stop whose delay was applied
     held_at_timepoint: bool = False
     block_delay_s: int | None = None  # lateness carried over from the previous trip on the block
+    from_vehicle: bool = False  # estimated from the bus's reported position (no TripUpdate)
+    drift_s: int = 0  # correction applied by drift.DriftModel (learned from observed departures)
 
     @property
     def delay_s(self) -> int:
@@ -129,6 +135,15 @@ def compute_departures(
         if stale and src != SRC_SCHEDULE:
             est, src = sv.sched, SRC_SCHEDULE
 
+        from_vehicle = False
+        if src == SRC_SCHEDULE and vehicle is not None and not stale and vehicle.stop_id:
+            pos = _vehicle_position_delay(index, trip.trip_id, vehicle, sv)
+            if pos == "passed":
+                continue  # the bus has already left this stop
+            if pos is not None:
+                ref_seq, delay = pos
+                est, src, from_vehicle = sv.sched + delay, SRC_ORIGIN, True
+
         held = sv.visit.timepoint and not sv.ends_here and est < sv.sched
         if held:
             est = sv.sched
@@ -162,6 +177,7 @@ def compute_departures(
                 ref_stop_sequence=ref_seq,
                 held_at_timepoint=held,
                 block_delay_s=block_delay,
+                from_vehicle=from_vehicle,
             )
         )
     out.sort(key=lambda d: (d.est, d.route))
@@ -180,6 +196,27 @@ def _nearest_delay(index: StaticIndex, trip_id: str, stop_times: dict[int, int],
             if abs(delay) < MAX_RT_OFFSET_S:
                 return ref, delay
     return None
+
+
+def _vehicle_position_delay(index: StaticIndex, trip_id: str, vehicle, sv):
+    """(stop_sequence, delay) from where the bus says it is, or "passed" if it's beyond this stop."""
+    seqs = index.sequences_of_stop(trip_id, vehicle.stop_id)
+    if not seqs:
+        return None
+    at = [q for q in seqs if q <= sv.visit.stop_sequence]
+    if not at:
+        return "passed"
+    vseq = max(at)
+    secs = index.stop_sched_secs(trip_id, vseq)
+    if secs is None:
+        return None
+    base = sv.sched - sv.visit.departure_secs
+    # At or heading to stop vseq at this time, so at least this late there (IN_TRANSIT_TO means it
+    # hasn't arrived yet). Running early before reaching this stop isn't trusted: buses wait.
+    delay = vehicle.timestamp - (base + secs)
+    if abs(delay) > MAX_RT_OFFSET_S:
+        return None
+    return vseq, max(delay, 0)
 
 
 def _block_delay(index: StaticIndex, realtime: RealtimeSnapshot, trip, sv, now: int, stale_vehicle_s: int,

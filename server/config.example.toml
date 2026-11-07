@@ -35,6 +35,12 @@ past_grace_s = 60
 # with no minimum layover, slightly better 40+ min ahead with 120 s, worse with 300 s. Off until a
 # weekday of live observations confirms it (`python -m busboard.accuracy` with block_propagation on).
 block_propagation = false
+# Correct predictions for how buses drift from GP Metro's predictions, learned per route, direction
+# and stop from the last drift_window_s of observed departures (see drift.py). Measured 2026-11-07:
+# mean abs error 10-40 min ahead 2.6-2.8 -> 2.4-2.5 min; the biased stops (168, 175, 586) ~1 min
+# better. Re-check with `python -m busboard.accuracy` (it replays this causally).
+drift_correction = true
+drift_window_s = 10800
 block_layover_s = 120
 # Ignore realtime predictions for trips whose vehicle hasn't reported its position in this long.
 # Seen 2026-11-06: a real bus went 7.7 min without reporting then came back; ghosts were silent

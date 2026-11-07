@@ -22,6 +22,8 @@ class Config:
     past_grace_s: int
     stale_vehicle_s: int
     block_layover_s: int | None
+    drift_correction: bool
+    drift_window_s: int
     board_rows: int
     payload_rows: int
     ucop_base_url: str
@@ -63,6 +65,8 @@ def load_config(path: Path | None = None) -> Config:
         past_grace_s=deps["past_grace_s"],
         stale_vehicle_s=deps["stale_vehicle_s"],
         block_layover_s=deps.get("block_layover_s", 0) if deps.get("block_propagation", False) else None,
+        drift_correction=bool(deps.get("drift_correction", False)),
+        drift_window_s=int(deps.get("drift_window_s", 3 * 3600)),
         board_rows=deps["board_rows"],
         payload_rows=deps.get("payload_rows", deps["board_rows"]),
         ucop_base_url=ucop["base_url"].rstrip("/"),

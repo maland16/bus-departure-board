@@ -120,8 +120,8 @@ def main(argv=None) -> int:
 
     print(f"\n{n_snaps} snapshots replayed\n")
     print("Expected diffs (UCOP shows something stale): ghost bus (V), ghost on block (B), held at timepoint (T),\n"
-          "trip gone from feed (G). Other diffs by our source: s2 = this stop, s1 = another stop, s0 = schedule.\n")
-    hdr = (f"{'stop':>5} {'rows':>6} {'both':>6} {'match':>6} {'+exp':>6} {'V/B/T/G':>12} {'other s2/s1/s0':>15} "
+          "trip gone from feed (G), drift correction (D). Other diffs by our source: s2 = this stop, s1 = another stop, s0 = schedule.\n")
+    hdr = (f"{'stop':>5} {'rows':>6} {'both':>6} {'match':>6} {'+exp':>6} {'V/B/T/G/D':>12} {'other s2/s1/s0':>15} "
            f"{'ours/ucop only':>15} {'headsign':>8}")
     print(hdr)
     print("-" * len(hdr))

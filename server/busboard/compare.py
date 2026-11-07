@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 import threading
 import time
@@ -32,11 +33,12 @@ DIFF_REASONS = {
     "stale_block": "an earlier trip on the same block has a ghost bus",
     "held_at_timepoint": "we don't show buses leaving a timepoint early (they wait)",
     "gone_from_feed": "the trip left the realtime feed; UCOP still shows its last prediction",
+    "drift_correction": "our learned drift correction moved the time; uncorrected, it matched UCOP",
     "src2": "other: predicted for this stop",
     "src1": "other: estimated from another stop",
     "src0": "other: schedule only",
 }
-EXPECTED_REASONS = ("stale_vehicle", "stale_block", "held_at_timepoint", "gone_from_feed")
+EXPECTED_REASONS = ("stale_vehicle", "stale_block", "held_at_timepoint", "gone_from_feed", "drift_correction")
 # Same precedence as CompareRow.diff_reason, for rows stored before that column existed
 DIFF_REASON_SQL = """COALESCE(diff_reason, CASE WHEN stale_vehicle THEN 'stale_vehicle'
   WHEN stale_block THEN 'stale_block' ELSE 'src' || our_src END)"""
@@ -63,6 +65,9 @@ class CompareRow:
     timepoint: bool | None = None
     ref_stop_sequence: int | None = None
     held_at_timepoint: bool = False
+    drift_s: int = 0
+    from_vehicle: bool = False
+    raw_matches_ucop: bool = False  # before the drift correction, within tolerance of UCOP
     ucop_sched: int | None = None
     ucop_est: int | None = None
     ucop_status: str | None = None
@@ -88,6 +93,8 @@ class CompareRow:
             return "held_at_timepoint"
         if self.rt_updates is None and self.ucop_status in ("late", "early", "ok"):
             return "gone_from_feed"
+        if self.drift_s and self.raw_matches_ucop:
+            return "drift_correction"
         return f"src{self.our_src}"
 
     @property
@@ -139,6 +146,7 @@ def compare(
                 row.category = UCOP_DEPARTED
             else:
                 row.category = MATCH if abs(row.diff_s) <= tolerance_s else TIME_DIFF
+                row.raw_matches_ucop = abs(row.diff_s - row.drift_s) <= tolerance_s
         elif d:
             if d.est > ucop_until or d.est < now:
                 # Beyond the end of UCOP's list, or already due: we keep departures up for
@@ -166,6 +174,7 @@ def _fill_ours(row: CompareRow, d: Departure) -> None:
     row.stop_sequence, row.vehicle_id, row.vehicle_age_s = d.stop_sequence, d.vehicle_id, d.vehicle_age_s
     row.rt_updates, row.origin_delay_s, row.timepoint = d.rt_updates, d.origin_delay_s, d.timepoint
     row.ref_stop_sequence, row.held_at_timepoint = d.ref_stop_sequence, d.held_at_timepoint
+    row.drift_s, row.from_vehicle = d.drift_s, d.from_vehicle
 
 
 def no_ucop_rows(ours: list[Departure], now: int, window_ahead_s: int) -> list[CompareRow]:
@@ -178,13 +187,17 @@ def no_ucop_rows(ours: list[Departure], now: int, window_ahead_s: int) -> list[C
     return rows
 
 
-def compare_stop(index, realtime, ucop_arrivals: list[UcopArrival] | None, stop_code: str, now: int, cfg
-                 ) -> tuple[list[Departure], list[CompareRow]]:
+def compare_stop(index, realtime, ucop_arrivals: list[UcopArrival] | None, stop_code: str, now: int, cfg,
+                 drift=None) -> tuple[list[Departure], list[CompareRow]]:
     """Compute our departures for one stop and compare them with UCOP's (None: no UCOP page, so
-    just log ours). Used by the server and replay."""
+    just log ours). With a drift.DriftModel, the raw predictions are recorded for it to learn from
+    and the corrected ones (what the boards get) are compared. Used by the server and replay."""
     ours = compute_departures(index, realtime, stop_code, now, window_ahead_s=cfg.window_ahead_s,
                               past_grace_s=MAX_LATENESS_S, stale_vehicle_s=cfg.stale_vehicle_s,
                               block_layover_s=cfg.block_layover_s)
+    if drift is not None:
+        drift.record(index, ours, now)
+        ours = drift.correct(index, [dataclasses.replace(d) for d in ours], now)
     if ucop_arrivals is None:
         return ours, no_ucop_rows(ours, now, cfg.window_ahead_s)
     rows = compare(ours, ucop_arrivals, now, tolerance_s=cfg.match_tolerance_s,
@@ -223,7 +236,7 @@ ADDED_COLUMNS = {
         "visit": "INTEGER", "stop_sequence": "INTEGER", "vehicle_id": "TEXT", "vehicle_age_s": "INTEGER",
         "rt_updates": "INTEGER", "origin_delay_s": "INTEGER", "ucop_status_text": "TEXT", "ucop_countdown": "TEXT",
         "timepoint": "INTEGER", "ref_stop_sequence": "INTEGER", "held_at_timepoint": "INTEGER",
-        "diff_reason": "TEXT",
+        "diff_reason": "TEXT", "drift_s": "INTEGER", "from_vehicle": "INTEGER",
     },
     "snapshots": {
         "archive": "TEXT",  # archive/YYYYMMDD/HHMMSS directory holding this snapshot's inputs
@@ -233,7 +246,7 @@ ROW_COLUMNS = [
     "snapshot_id", "ts", "stop_code", "service_date", "trip_id", "visit", "route", "category",
     "our_sched", "our_est", "our_src", "stale_vehicle", "stale_block", "stop_sequence", "vehicle_id",
     "vehicle_age_s", "rt_updates", "origin_delay_s", "timepoint", "ref_stop_sequence",
-    "held_at_timepoint", "diff_reason", "ucop_sched", "ucop_est", "ucop_status",
+    "held_at_timepoint", "diff_reason", "drift_s", "from_vehicle", "ucop_sched", "ucop_est", "ucop_status",
     "ucop_status_text", "ucop_countdown", "diff_s", "our_headsign", "ucop_headsign", "headsign_differs",
 ]
 
@@ -321,6 +334,20 @@ class CompareStore:
                     q, {"stop": stop_code, "since": since, "unc": max_uncertainty_s, "lo": lo * 60, "hi": hi * 60}
                 ).fetchone())
         return out
+
+    def drift_training(self, since: int) -> list[dict]:
+        """Past raw predictions (stored estimate minus the drift applied) with their observed departure,
+        to warm-start the drift model after a restart."""
+        with self._lock:
+            return [dict(r) for r in self._db.execute(
+                """SELECT r.ts, r.service_date, r.trip_id, r.stop_code, r.stop_sequence, r.our_src,
+                          r.our_est - COALESCE(r.drift_s, 0) AS raw_est,
+                          (o.departed_after + o.departed_by) / 2 AS actual
+                   FROM rows r JOIN observed_departures o
+                     ON o.service_date = r.service_date AND o.trip_id = r.trip_id AND o.stop_code = r.stop_code
+                    AND o.stop_sequence = r.stop_sequence
+                   WHERE r.ts >= ? AND r.our_src IN (1, 2) AND o.departed_after IS NOT NULL
+                     AND r.category NOT IN ('ucop_departed', 'ours_terminating')""", (since,))]
 
     def observed_count(self, stop_code: str, since: int) -> int:
         with self._lock:

@@ -27,6 +27,16 @@ For each scheduled visit to the stop, the first rule that applies:
 - At timepoints, a departure is never shown earlier than scheduled: buses wait there, even when the feed says
   otherwise. This doesn't apply where a trip ends.
 - Trips that drop out of the feed for a poll keep their last prediction for 2 minutes.
+- If a trip has no usable TripUpdate but its bus is reporting its position, the delay is taken from where the bus is
+  (its report time minus its scheduled time at the stop it's at or heading to). If the bus is already past this
+  stop, the departure is dropped.
+- **Drift correction** (`drift_correction`, on): GP Metro's predictions are right just before a bus leaves but drift
+  with lead time, by route and place along it: on 2026-11-07 buses at Congress St + Park/State left ~3 min later
+  than predicted 20+ min ahead, while other routes left early. For each route, direction and stop, the server
+  fits how far actual departures (from vehicle positions) drifted per minute of lead over the last 3 hours, and
+  shifts predictions by that, scaled down until a few departures have been seen and capped at 5 minutes. It never
+  moves a departure before its scheduled time at a timepoint. Learned state is rebuilt from `compare.db` on restart;
+  `/health` shows the largest corrections.
 - Optional, off by default (`block_propagation`): a trip can't start before its bus finishes the previous trip on the
   same block. Re-measure with `busboard.accuracy` before turning it on.
 - Departures more than 60 s in the past are dropped.
@@ -47,6 +57,8 @@ viewed. Departures are matched on the GTFS trip ID in UCOP's `data-key` attribut
 - `ucop_departed`: UCOP keeps departed buses listed and we don't. Not counted.
 - `ours_terminating`: a trip ending at this stop that only we list. UCOP caps its lists at 40 entries and leaves many
   of these out at hubs, and our board doesn't show them. Not counted.
+- `drift_correction` (a `diff_reason`): our drift correction moved the time, and the uncorrected prediction matched
+  UCOP. Expected, since UCOP doesn't correct.
 - `no_ucop`: UCOP's page couldn't be fetched. Our departures are still logged for accuracy scoring. Not counted.
 
 Each `time_diff` also gets a `diff_reason`. `stale_vehicle`, `stale_block`, `held_at_timepoint` and

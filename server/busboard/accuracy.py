@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import dataclasses
 import json
 import sqlite3
 import statistics
@@ -24,6 +25,7 @@ from pathlib import Path
 from .archive import InputArchive
 from .config import load_config
 from .departures import compute_departures
+from .drift import DriftModel
 from .observe import DepartureObserver, ObservedDeparture
 from .replay import replay_inputs
 from .ucop import parse_stop_page
@@ -76,21 +78,37 @@ def main(argv=None) -> int:
     derived: dict[tuple, ObservedDeparture] = {}
     observer = None
     preds = []  # (ts, stop, key, source, est, extra)
+    # Drift correction learns causally: only from departures observed before each snapshot
+    drift = DriftModel(window_s=cfg.drift_window_s) if cfg.drift_correction else None
+    live_sorted = sorted(live_obs.values(), key=lambda o: o.departed_by)
+    live_i = 0
 
     for snap, index, rt, stops in replay_inputs(archive, cfg, args.since, args.until, args.stop,
                                                 use_config_stops=True):
         if observer is None:
             observer = DepartureObserver({index.stop_id_for(c) for c in cfg.stops if index.stop_id_for(c)})
-        for o in observer.update(index, rt.vehicles_by_trip):
+        new = observer.update(index, rt.vehicles_by_trip)
+        for o in new:
             derived[(o.service_date, o.trip_id, o.stop_sequence, o.stop_id)] = o
         observer.forget_older_than(snap.ts - 2 * 3600)
+        if drift:
+            while live_i < len(live_sorted) and live_sorted[live_i].departed_by <= snap.ts:
+                drift.resolve(live_sorted[live_i])  # precise live observations first
+                live_i += 1
+            for o in new:
+                drift.resolve(o)
+            drift.prune(snap.ts)
         for code in stops:
             stop_id = index.stop_id_for(code)
             ucop_meta = snap.meta.get("ucop", {}).get(code, {})
             now = int(ucop_meta.get("fetched_at") or snap.ts)
-            for d in compute_departures(index, rt, code, now, window_ahead_s=cfg.window_ahead_s,
-                                        past_grace_s=cfg.past_grace_s, stale_vehicle_s=cfg.stale_vehicle_s,
-                                        block_layover_s=cfg.block_layover_s):
+            deps = compute_departures(index, rt, code, now, window_ahead_s=cfg.window_ahead_s,
+                                      past_grace_s=cfg.past_grace_s, stale_vehicle_s=cfg.stale_vehicle_s,
+                                      block_layover_s=cfg.block_layover_s)
+            if drift:
+                drift.record(index, deps, now)
+                deps = drift.correct(index, [dataclasses.replace(d) for d in deps], now)
+            for d in deps:
                 if d.ends_here or d.canceled:
                     continue
                 key = (d.service_date, d.trip_id, d.stop_sequence, stop_id)

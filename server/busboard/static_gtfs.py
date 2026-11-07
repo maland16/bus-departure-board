@@ -51,6 +51,7 @@ class Trip:
     origin_stop_sequence: int
     origin_departure_secs: int
     last_stop_sequence: int
+    direction_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -283,6 +284,7 @@ def build_index(zip_bytes: bytes, stop_codes: list[str], version: str = "") -> S
             origin_stop_sequence=first[tid][0],
             origin_departure_secs=first[tid][1],
             last_stop_sequence=last[tid][0],
+            direction_id=(r.get("direction_id") or "").strip(),
         )
     for stop_id in visits:
         visits[stop_id] = [v for v in visits[stop_id] if v.trip_id in trips]
