@@ -3,3 +3,10 @@ src/departure-board/credentials.h
 src/credentials-dev.h
 src/departure-board/git-version.h
 src/departure-board/build/
+
+# Departure board server
+server/.venv/
+server/data/
+__pycache__/
+.pytest_cache/
+server/data-pi/
