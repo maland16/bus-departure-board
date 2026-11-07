@@ -39,6 +39,7 @@ def test_preview_is_upright():
 
 
 def test_payload_shape():
-    p = build_payload("1117", "Congress St + Center St", deps()[:2], NOW)
+    p = build_payload("1117", "Congress St + Center St", deps()[:2], NOW, TZ)
     assert p["v"] == 1 and p["now"] == NOW and len(p["deps"]) == 2
+    assert p["tz"] == -5 * 3600 and p["live"] is True  # EST in November
     assert set(p["deps"][0]) == {"r", "h", "t", "s", "src"}

@@ -1,0 +1,10 @@
+# Uploaded by the busboard publisher into the v1/ directory on the web host (as .htaccess).
+# The boards poll these files: never let a cache serve old departures.
+<IfModule mod_headers.c>
+  Header set Cache-Control "no-cache, max-age=0"
+</IfModule>
+<IfModule mod_expires.c>
+  ExpiresActive Off
+</IfModule>
+AddType "application/json; charset=utf-8" .json
+Options -Indexes

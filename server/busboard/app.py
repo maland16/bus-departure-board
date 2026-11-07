@@ -21,7 +21,8 @@ from .config import load_config
 from .observe import DepartureObserver
 from .departures import board_departures, compute_departures
 from .payload import build_payload
-from .realtime import RealtimeFeed
+from .publish import Publisher
+from .realtime import RealtimeFeed, RealtimeSnapshot
 from .render import panel_bmp_to_portrait_png, render_board, to_panel_bmp
 from .static_gtfs import StaticFeed, StaticIndex
 from .ucop import UcopClient, UcopSnapshot
@@ -33,6 +34,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)  # otherwise every 30 s pol
 cfg = load_config()
 static = StaticFeed(cfg.static_url, cfg.data_dir, cfg.stops)
 realtime = RealtimeFeed(cfg.trip_updates_url, cfg.vehicle_positions_url, cfg.realtime_hold_missing_s)
+publisher = Publisher(cfg.publish_target, cfg.publish_public_url, cfg.publish_ssh_key, cfg.data_dir)
+PUBLISHING = cfg.publish_enabled and bool(cfg.publish_target)
 store = CompareStore(cfg.data_dir / "compare.db")
 events = EventLog(cfg.data_dir)
 archive = InputArchive(cfg.data_dir)
@@ -73,9 +76,20 @@ def _ucop() -> UcopClient:
     return _ucop_client
 
 
+def realtime_is_live(now: float | None = None) -> bool:
+    fetched = realtime.snapshot.trip_updates_fetched_at
+    return bool(fetched) and (now or time.time()) - fetched <= cfg.realtime_max_age_s
+
+
+def _display_realtime() -> RealtimeSnapshot:
+    """The realtime data to build departures from: none at all once the TripUpdate feed has been
+    failing for realtime_max_age_s, so old predictions aren't served as if they were current."""
+    return realtime.snapshot if realtime_is_live() else RealtimeSnapshot()
+
+
 def _departures(code: str, now: int, past_grace_s: int | None = None):
     return compute_departures(
-        _index(), realtime.snapshot, code, now,
+        _index(), _display_realtime(), code, now,
         window_ahead_s=cfg.window_ahead_s,
         past_grace_s=cfg.past_grace_s if past_grace_s is None else past_grace_s,
         stale_vehicle_s=cfg.stale_vehicle_s,
@@ -182,6 +196,7 @@ def _compare_tick():
     if static.index is None:
         return
     idx, rt_snap = static.index, realtime.snapshot  # same inputs for every stop in this round
+    rt_used = _display_realtime()
     now = time.time()
     pages: dict[str, UcopSnapshot] = {}
     for code in _active_stops():
@@ -208,7 +223,7 @@ def _compare_tick():
         t = int(snap.fetched_at)
         no_page = bool(snap.error) and not snap.arrivals
         # Without UCOP's page, still log our departures so they can be scored against actual ones
-        ours, rows = compare_stop(idx, rt_snap, None if no_page else snap.arrivals, code, t, cfg)
+        ours, rows = compare_stop(idx, rt_used, None if no_page else snap.arrivals, code, t, cfg)
         if _ucop_error_by_stop.get(code) != snap.error:  # log changes, not every failed fetch
             events.write("ucop_error" if snap.error else "ucop_recovered", stop=code, error=snap.error)
             _ucop_error_by_stop[code] = snap.error
@@ -216,6 +231,32 @@ def _compare_tick():
     store.prune(cfg.retention_days)
     archive.prune(cfg.archive_days)
     events.prune(max(cfg.retention_days, cfg.archive_days))
+
+
+_last_publish_error: str | None = None
+_served_stale_logged = False
+
+
+def _publish_tick():
+    """Write every stop's payload and push them to the web host."""
+    global _last_publish_error, _served_stale_logged
+    if static.index is None:
+        return
+    now = int(time.time())
+    publisher.write({code: _payload(code, now) for code in _active_stops()}, now)
+    publisher.push()
+    if publisher.last_error != _last_publish_error:  # log changes, not every failed push
+        events.write("publish_error" if publisher.last_error else "publish_recovered",
+                     error=publisher.last_error, target=cfg.publish_target)
+        _last_publish_error = publisher.last_error
+    due = publisher.last_verify is None or now - publisher.last_verify >= cfg.publish_verify_interval_s
+    if publisher.last_ok and due:
+        lag = publisher.verify()
+        stale = lag is None or lag > 120
+        if stale and not _served_stale_logged:
+            events.write("publish_served_stale", served_lag_s=lag, error=publisher.verify_error,
+                         url=f"{cfg.publish_public_url}/index.json")
+        _served_stale_logged = stale
 
 
 @contextlib.asynccontextmanager
@@ -229,6 +270,7 @@ async def lifespan(_app: FastAPI):
         asyncio.create_task(_every(cfg.static_check_interval_s, _static_tick, "static refresh")),
         asyncio.create_task(_every(cfg.realtime_poll_interval_s, _realtime_tick, "realtime refresh")),
         asyncio.create_task(_every(cfg.compare_interval_s, _compare_tick, "ucop compare")),
+        *([asyncio.create_task(_every(cfg.publish_interval_s, _publish_tick, "publish"))] if PUBLISHING else []),
     ]
     yield
     for t in tasks:
@@ -251,8 +293,14 @@ def departures_json(code: str, debug: bool = False):
     now = int(time.time())
     deps = _departures(code, now)
     if debug:
-        return {"now": now, "departures": [d.to_dict() for d in deps]}
-    return build_payload(code, _stop_name(code), board_departures(deps, cfg.board_rows), now)
+        return {"now": now, "live": realtime_is_live(now), "departures": [d.to_dict() for d in deps]}
+    return _payload(code, now, deps)
+
+
+def _payload(code: str, now: int, deps=None) -> dict:
+    deps = _departures(code, now) if deps is None else deps
+    return build_payload(code, _stop_name(code), board_departures(deps, cfg.payload_rows), now, _index().tz,
+                         live=realtime_is_live(now))
 
 
 def _our_bmp(code: str) -> bytes:
@@ -317,6 +365,7 @@ def health():
             code: {"age_s": round(now - s.fetched_at), "arrivals": len(s.arrivals), "error": s.error}
             for code, s in ucop_latest.items()
         },
+        "publish": publisher.status() if PUBLISHING else "disabled",
     }
     return JSONResponse(body, status_code=200 if ok else 503)
 
@@ -360,6 +409,17 @@ def _summary_table(s: dict) -> str:
     a, n = col(s["all"]), col(s["near_term"])
     body = "".join(f"<tr><th>{html.escape(l)}</th><td>{x}</td><td>{y}</td></tr>" for l, x, y in zip(labels, a, n))
     return f"<table><tr><th></th><th>All rows</th><th>Due within 15 min</th></tr>{body}</table>"
+
+
+def _publish_line() -> str:
+    if not PUBLISHING:
+        return "Publishing to the boards' web host is off (see [publish] in config.toml)."
+    st = publisher.status()
+    when = "never" if st["last_ok_age_s"] is None else f"{st['last_ok_age_s']} s ago"
+    served = "" if st["served_lag_s"] is None else f"; last check: the host served data {st['served_lag_s']} s old"
+    err = f" <b>Last push failed:</b> {html.escape(st['error'])}" if st["error"] else ""
+    return (f"Publishing to <a href='{html.escape(cfg.publish_public_url)}/index.json'>"
+            f"{html.escape(cfg.publish_public_url)}</a>: last successful push {when}{served}.{err}")
 
 
 def _err(mae, n) -> str:
@@ -455,6 +515,7 @@ def compare_overview():
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="120"><title>Board comparison</title>{PAGE_STYLE}</head><body>
 <h1>Our departures vs UCOP, last 24 hours</h1>
+<p>{_publish_line()}</p>
 <p>Counts are comparison rows: each trip is compared every {cfg.compare_interval_s // 60} min while both lists show it.
  Times match if within {cfg.match_tolerance_s} s. "Expected" differences are where UCOP shows something stale (ghost
  buses, trips gone from the feed, buses leaving a timepoint early).

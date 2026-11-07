@@ -109,10 +109,73 @@ SELECT stop_code, route, trip_id, (our_est - our_sched) AS early_s, ucop_status_
 WHERE timepoint AND our_est < our_sched - 60 AND category IN ('match', 'time_diff');
 ```
 
+## Publishing for the boards
+
+The boards will fetch a small JSON file per stop from a static web host, instead of UCOP's 48 KB bitmap. Every 30 s
+the Pi writes the files into `data/publish/v1/` and pushes them with rsync over SSH. The connection is outbound only,
+so nothing is opened on the home network. If the Pi or the home internet goes down, the files stop updating; the
+boards will see an old `now` and fall back to UCOP.
+
+```
+https://board.devinmalanaphy.com/v1/index.json          {"v":1,"now":...,"stops":{"1117":"Congress St + Center St",...}}
+https://board.devinmalanaphy.com/v1/stops/1117.json     one payload per stop
+```
+
+### Payload (schema v1)
+
+```json
+{"v":1,"now":1794070000,"tz":-18000,"live":true,"stop":"1117","name":"Congress St + Center St",
+ "deps":[{"r":"4","h":"Metro Pulse","t":1794070420,"s":1794070380,"src":2}, ...],"alerts":[]}
+```
+
+| Field | Meaning |
+| - | - |
+| `now` | When it was generated (epoch s). Treat old payloads as stale |
+| `tz` | The stop's UTC offset at `now` in seconds (-18000 = EST), for showing clock times without DST rules on the board |
+| `live` | `false` when GP Metro's realtime feed has been down for 10 min: every time is the schedule |
+| `deps` | Up to 12 departures, soonest first, excluding trips that end here. 12 rather than 8 so a board that fetches every few minutes still has rows left as buses leave |
+| `r`, `h` | Route and headsign |
+| `t`, `s` | Estimated and scheduled departure (epoch s) |
+| `src` | 2 = predicted for this stop, 1 = estimated from another stop, 0 = schedule only |
+
+New fields may be added within v1; boards should ignore ones they don't know.
+
+### DreamHost setup (one time)
+
+Panel labels may differ slightly.
+
+1. **Users:** add a user of type **SFTP/SSH (shell)**, e.g. `busboard_pub`. A dedicated user means the Pi's key can't
+   touch the main website.
+2. **Websites:** add `board.devinmalanaphy.com`, fully hosted, owned by `busboard_pub`. Its directory is
+   `/home/busboard_pub/board.devinmalanaphy.com`. DNS is created automatically, since the domain uses DreamHost's
+   nameservers.
+3. **Secure Certificates:** add the free Let's Encrypt certificate for the subdomain.
+4. Note the SSH host the panel shows for the user.
+5. On the Pi, install the upload key. You'll be asked for the user's password once:
+   `ssh -t busbox@192.168.1.27 ssh-copy-id -i ~/.ssh/busboard_publish.pub busboard_pub@<ssh host>`
+6. In `config.toml` (your local copy of `config.example.toml`), set `[publish] enabled = true` and
+   `target = "busboard_pub@<ssh host>:board.devinmalanaphy.com/v1"`, then deploy.
+
+The publisher uploads a `.htaccess` (from `deploy/dreamhost/htaccess`) into `v1/`. It turns off caching (the main site
+sends `max-age=600`), sets the JSON content type and disables directory listing. rsync never deletes anything on the
+host, and the target must end in `/v1`.
+
+### Checking it
+
+- `/health` has a `publish` section: last successful push, its duration, and how old the data was when the host
+  served it back (`served_lag_s`, checked every 10 min).
+- Events: `publish_error` / `publish_recovered` when pushes start or stop failing, `publish_served_stale` if the host
+  serves data over 2 min old (caching, or pushes landing in the wrong directory).
+- `curl -sI https://board.devinmalanaphy.com/v1/stops/1117.json` should show `content-type: application/json` and
+  `cache-control: no-cache, max-age=0`.
+- If pushes fail with "Permission denied (publickey)", repeat step 5. Test with
+  `ssh -i ~/.ssh/busboard_publish -o BatchMode=yes busboard_pub@<ssh host> true` on the Pi.
+
 ## Running
 
 ```sh
 cd server
+cp config.example.toml config.toml   # first time only: config.toml holds this machine's settings and isn't in git
 uv sync
 uv run pytest
 uv run uvicorn busboard.app:app --port 8080     # BUSBOARD_CONFIG=... to use another config file
