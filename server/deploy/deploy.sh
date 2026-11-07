@@ -6,6 +6,12 @@ set -euo pipefail
 TARGET="${1:-busbox@192.168.1.27}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 
+# config.toml isn't in git (it holds the publish target); it's copied to the Pi from here
+if [ ! -f "$HERE/config.toml" ]; then
+  echo "server/config.toml not found. Start from the template: cp server/config.example.toml server/config.toml" >&2
+  exit 1
+fi
+
 rsync -a --delete \
   --exclude '.venv/' --exclude 'data/' --exclude 'data-pi/' --exclude '__pycache__/' --exclude '.pytest_cache/' \
   "$HERE/" "$TARGET:busboard/"

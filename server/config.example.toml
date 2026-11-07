@@ -1,3 +1,6 @@
+# Template for config.toml, which holds this machine's settings and isn't in git.
+# Copy it to start: cp config.example.toml config.toml
+
 # Stop codes as shown on the bus stop sign (GTFS stop_code, e.g. 1117 -> stop_id "0:1117").
 # Codes missing from the static feed are skipped (and shown as missing) until they appear.
 # Every stop gets departures, comparison with UCOP's stop page where it has one, and observed
@@ -18,6 +21,9 @@ static_check_interval_s = 3600
 realtime_poll_interval_s = 30
 # Trips sometimes drop out of a single TripUpdate fetch; keep their last prediction this long
 realtime_hold_missing_s = 120
+# If the TripUpdate feed hasn't been fetched successfully for this long, serve the schedule only
+# (and say so: "live": false in the payload) rather than predictions that are going stale
+realtime_max_age_s = 600
 
 [departures]
 # How far ahead to list departures
@@ -36,6 +42,9 @@ block_layover_s = 120
 stale_vehicle_s = 900
 # Rows on the board / in the JSON payload
 board_rows = 8
+# Rows in the JSON payload. More than the board shows, so a board that fetches every few minutes
+# and counts down on its own clock still has rows left as buses leave.
+payload_rows = 12
 
 [ucop]
 base_url = "https://transit.ucop.me"
@@ -54,3 +63,15 @@ retention_days = 14
 # version is kept too (~2 MB each).
 archive_days = 7
 static_versions_kept = 30
+
+[publish]
+# Push each stop's JSON payload to a web host over SSH/rsync, for the boards to fetch.
+# See README.md, "Publishing for the boards", for the DreamHost setup.
+enabled = false
+# rsync destination; the path must end in /v1. e.g. "busboard_pub@<ssh host>:board.devinmalanaphy.com/v1"
+target = ""
+public_url = "https://board.devinmalanaphy.com/v1"
+interval_s = 30
+ssh_key = "~/.ssh/busboard_publish"
+# How often to fetch the published index.json back, to check what the boards would actually get
+verify_interval_s = 600

@@ -3,13 +3,18 @@ parent station sharing the stop code), plus helpers to build realtime feeds."""
 
 import datetime as dt
 import io
+import os
 import zipfile
 from zoneinfo import ZoneInfo
 
 import pytest
 from google.transit import gtfs_realtime_pb2 as rt
 
+from busboard.config import EXAMPLE_CONFIG
 from busboard.static_gtfs import build_index
+
+# Tests never read this machine's config.toml (it isn't in git, and holds the publish target)
+os.environ["BUSBOARD_CONFIG"] = str(EXAMPLE_CONFIG)
 
 TZ = ZoneInfo("America/New_York")
 

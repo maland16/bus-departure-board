@@ -3,7 +3,7 @@ import re
 
 from busboard import accuracy
 from busboard.archive import InputArchive
-from busboard.config import DEFAULT_CONFIG
+from busboard.config import EXAMPLE_CONFIG
 from busboard.compare import NO_UCOP, CompareStore, compare, no_ucop_rows
 from busboard.observe import DepartureObserver
 from busboard.realtime import parse_vehicle_positions
@@ -89,8 +89,8 @@ def test_accuracy_tool_end_to_end(tmp_path, capsys):
         vp = vehicle_positions({"T_STOP": ("V1", ts - 5, stop, status)})
         archive.save_snapshot(ts, {"ts": ts, "static": name, "stops": [], "ucop": {}},
                               {"TripUpdate.pb": tu, "VehiclePosition.pb": vp})
-    cfg = tmp_path / "config.toml"  # the real config, limited to one stop
-    cfg.write_text(re.sub(r"^stops = \[.*?\]", 'stops = ["1117"]', DEFAULT_CONFIG.read_text(), flags=re.S | re.M))
+    cfg = tmp_path / "config.toml"  # the template config, limited to one stop
+    cfg.write_text(re.sub(r"^stops = \[.*?\]", 'stops = ["1117"]', EXAMPLE_CONFIG.read_text(), flags=re.S | re.M))
     rows = tmp_path / "acc.jsonl"
     assert accuracy.main([str(data), "--config", str(cfg), "--rows", str(rows), "--max-uncertainty", "120"]) == 0
     scored = [json.loads(l) for l in rows.read_text().splitlines()]
