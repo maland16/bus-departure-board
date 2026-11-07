@@ -8,13 +8,16 @@ Notes on this particular feed (see also the project notes on GP Metro's feeds):
 
 from __future__ import annotations
 
+import bisect
 import csv
 import datetime as dt
 import io
 import json
 import logging
+import re
 import time
 import zipfile
+from array import array
 from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -27,7 +30,7 @@ USER_AGENT = "busboard/0.1 (bus departure board server)"
 NOON_MINUS_12H = 12 * 3600
 
 # Words that stay upper case when title-casing ALL CAPS headsigns
-UPPER_WORDS = {"JC", "SMCC", "BRZ", "HSK", "US", "ME", "UNE", "USM", "VA", "II", "III"}
+UPPER_WORDS = {"JC", "SMCC", "BRZ", "HSK", "US", "ME", "UNE", "USM", "VA", "II", "III", "MMC", "IB", "OB"}
 
 
 @dataclass(frozen=True)
@@ -72,14 +75,16 @@ class ScheduledVisit:
 
 def tidy_headsign(text: str) -> str:
     """Title-case ALL CAPS words ("FALMOUTH SHAW'S" -> "Falmouth Shaw's"), keeping known acronyms.
-    Works word by word, since some headsigns are mixed ("THOMAS ST + Millcreek Hub")."""
+    Works on each run of letters, since some names are mixed ("THOMAS ST + Millcreek Hub") or
+    run words together ("WASHINGTON&CUMB")."""
 
-    def word(w: str) -> str:
-        if len(w) < 2 or not w.isupper() or w in UPPER_WORDS or not w[:1].isalpha():
+    def word(m: re.Match) -> str:
+        w = m.group(0)
+        if len(w) < 2 or not w.isupper() or w in UPPER_WORDS:
             return w
-        return "-".join(p[:1].upper() + p[1:].lower() for p in w.split("-"))
+        return w[0] + w[1:].lower()
 
-    return " ".join(word(w) for w in text.split())
+    return re.sub(r"[A-Za-z][A-Za-z']*", word, " ".join(text.split()))
 
 
 def parse_gtfs_time(value: str) -> int:
@@ -106,6 +111,8 @@ class StaticIndex:
         services_by_date: dict[str, set[str]],
         version: str,
         missing_stop_codes: list[str] | None = None,
+        trip_schedules: dict[str, tuple[array, array, array]] | None = None,
+        stop_id_list: list[str] | None = None,
     ):
         self.tz = tz
         self.stop_ids_by_code = stop_ids_by_code
@@ -116,6 +123,18 @@ class StaticIndex:
         self.services_by_date = services_by_date
         self.version = version
         self.missing_stop_codes = missing_stop_codes or []
+        # trip_id -> (stop_sequences, departure_secs, stop indexes into stop_id_list), sorted by
+        # sequence; arrays keep this compact on the Pi
+        self.trip_schedules = trip_schedules or {}
+        self.stop_id_list = stop_id_list or []
+        self._stop_index = {sid: i for i, sid in enumerate(self.stop_id_list)}
+        # block_id -> trips on it, in order of their first departure (all service days mixed)
+        self.trips_by_block: dict[str, list[Trip]] = {}
+        for t in self.trips.values():
+            if t.block_id:
+                self.trips_by_block.setdefault(t.block_id, []).append(t)
+        for ts in self.trips_by_block.values():
+            ts.sort(key=lambda t: t.origin_departure_secs)
         self.loaded_at = time.time()
 
     @property
@@ -154,6 +173,38 @@ class StaticIndex:
         day = dt.datetime.strptime(service_date, "%Y%m%d").date()
         return service_day_base(day, self.tz) + trip.origin_departure_secs
 
+    def stop_sched_secs(self, trip_id: str, stop_sequence: int) -> int | None:
+        """Scheduled departure (seconds from the service day base) of any stop on a trip."""
+        seqs, secs, _ = self.trip_schedules.get(trip_id, ((), (), ()))
+        i = bisect.bisect_left(seqs, stop_sequence)
+        if i < len(seqs) and seqs[i] == stop_sequence:
+            return secs[i]
+        return None
+
+    def trip_end_secs(self, trip_id: str) -> int | None:
+        """Scheduled time at the trip's last stop (seconds from the service day base)."""
+        _, secs, _ = self.trip_schedules.get(trip_id, ((), (), ()))
+        return secs[-1] if secs else None
+
+    def sequences_of_stop(self, trip_id: str, stop_id: str) -> list[int]:
+        """The stop_sequences at which a trip visits stop_id (usually one; two on loops)."""
+        i = self._stop_index.get(stop_id)
+        seqs, _, stops = self.trip_schedules.get(trip_id, ((), (), ()))
+        return [seqs[k] for k, s in enumerate(stops) if s == i] if i is not None else []
+
+    def previous_trip_on_block(self, trip: Trip) -> Trip | None:
+        """The trip the same bus runs just before this one (same block and service)."""
+        prev = None
+        for t in self.trips_by_block.get(trip.block_id, ()) if trip.block_id else ():
+            if t.trip_id == trip.trip_id:
+                return prev
+            if t.service_id == trip.service_id:
+                prev = t
+        return None
+
+    def stop_display_name(self, stop_id: str) -> str:
+        return tidy_headsign(self.stop_names.get(stop_id, stop_id))
+
 
 def _rows(zf: zipfile.ZipFile, name: str):
     try:
@@ -170,8 +221,10 @@ def build_index(zip_bytes: bytes, stop_codes: list[str], version: str = "") -> S
     tz = ZoneInfo(tz_name)
 
     stop_names, stop_ids_by_code = {}, {}
+    stop_index: dict[str, int] = {}
     for r in _rows(zf, "stops.txt"):
         stop_names[r["stop_id"]] = r["stop_name"].strip()
+        stop_index.setdefault(r["stop_id"], len(stop_index))
         code = (r.get("stop_code") or "").strip()
         # Prefer the boarding stop (location_type 0/blank) over a parent station with the same code
         if code and (code not in stop_ids_by_code or r.get("location_type", "0") in ("", "0")):
@@ -195,12 +248,16 @@ def build_index(zip_bytes: bytes, stop_codes: list[str], version: str = "") -> S
     visits: dict[str, list[StopVisit]] = {s: [] for s in wanted}
     first: dict[str, tuple[int, int]] = {}  # trip -> (seq, departure_secs)
     last: dict[str, tuple[int, str]] = {}  # trip -> (seq, stop_id)
+    stop_secs: dict[str, list[tuple[int, int, int]]] = {}  # trip -> [(seq, departure_secs, stop index)]
     for r in _rows(zf, "stop_times.txt"):
         trip_id, stop_id = r["trip_id"], r["stop_id"]
         seq = int(r["stop_sequence"])
         dep = r.get("departure_time") or r.get("arrival_time") or ""
         if stop_id in wanted and dep:
             visits[stop_id].append(StopVisit(trip_id, seq, parse_gtfs_time(dep), (r.get("timepoint") or "1") != "0"))
+        if dep:
+            stop_secs.setdefault(trip_id, []).append(
+                (seq, parse_gtfs_time(dep), stop_index.setdefault(stop_id, len(stop_index))))
         if dep and (trip_id not in first or seq < first[trip_id][0]):
             first[trip_id] = (seq, parse_gtfs_time(dep))
         if trip_id not in last or seq > last[trip_id][0]:
@@ -229,6 +286,12 @@ def build_index(zip_bytes: bytes, stop_codes: list[str], version: str = "") -> S
         )
     for stop_id in visits:
         visits[stop_id] = [v for v in visits[stop_id] if v.trip_id in trips]
+    trip_schedules = {}
+    for tid, pairs in stop_secs.items():
+        if tid in trips:
+            pairs.sort()
+            trip_schedules[tid] = tuple(array("i", (p[k] for p in pairs)) for k in range(3))
+    del stop_secs
 
     services_by_date: dict[str, set[str]] = {}
     weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -263,6 +326,8 @@ def build_index(zip_bytes: bytes, stop_codes: list[str], version: str = "") -> S
         services_by_date=services_by_date,
         version=version,
         missing_stop_codes=missing,
+        trip_schedules=trip_schedules,
+        stop_id_list=list(stop_index),
     )
 
 

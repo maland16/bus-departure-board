@@ -77,3 +77,42 @@ def test_board_skips_trips_ending_here(index):
 def test_unknown_stop(index):
     assert compute_departures(index, RealtimeSnapshot(), "4242", NOW,
                               window_ahead_s=3600, past_grace_s=60, stale_vehicle_s=300) == []
+
+
+def test_delay_from_nearest_stop_with_a_prediction(index):
+    # Seen in the real feed: a trip whose updates start mid-route, or only cover a later stop
+    snap = snapshot({"T_LOOP": {3: local(2026, 11, 6, 19, 46)}})  # seq 3 scheduled 19:40 -> 6 min late
+    deps = run(index, snap)
+    assert (deps["T_LOOP", 4].src, deps["T_LOOP", 4].est, deps["T_LOOP", 4].ref_stop_sequence) == (
+        SRC_ORIGIN, local(2026, 11, 6, 19, 56), 3)  # earlier stop preferred
+    assert (deps["T_LOOP", 2].est, deps["T_LOOP", 2].ref_stop_sequence) == (local(2026, 11, 6, 19, 36), 3)
+    assert deps["T_LOOP", 2].origin_delay_s is None
+
+
+def test_held_at_timepoint_not_shown_leaving_early(index):
+    snap = snapshot({
+        "T_STOP": {2: local(2026, 11, 6, 17, 58)},  # timepoint, predicted 7 min early
+        "T_SCHED": {2: local(2026, 11, 6, 18, 58)},  # not a timepoint: early is believable
+        "T_ENDS": {2: local(2026, 11, 6, 20, 5)},  # last stop: an early arrival is fine
+    })
+    deps = run(index, snap)
+    assert (deps["T_STOP", 2].est, deps["T_STOP", 2].held_at_timepoint) == (local(2026, 11, 6, 18, 5), True)
+    assert (deps["T_SCHED", 2].est, deps["T_SCHED", 2].held_at_timepoint) == (local(2026, 11, 6, 18, 58), False)
+    assert deps["T_ENDS", 2].est == local(2026, 11, 6, 20, 5)
+
+
+def test_stop_sched_secs(index):
+    assert index.stop_sched_secs("T_LOOP", 3) == 19 * 3600 + 40 * 60
+    assert index.stop_sched_secs("T_LOOP", 9) is None
+    assert index.stop_sched_secs("nope", 1) is None
+    assert [v.timepoint for v in index.visits["0:1117"] if v.trip_id == "T_SCHED"] == [False]
+
+
+def test_trips_missing_from_one_fetch_are_held():
+    from busboard.realtime import TripRT, carry_over_missing_trips
+    a, b = TripRT("A", {1: 100}, None), TripRT("B", {1: 200}, None)
+    seen = {}
+    assert set(carry_over_missing_trips({"A": a, "B": b}, seen, 1000, 120)) == {"A", "B"}
+    assert carry_over_missing_trips({"A": a}, seen, 1030, 120)["B"] is b  # B dropped out briefly
+    assert set(carry_over_missing_trips({"A": a}, seen, 1200, 120)) == {"A"}  # gone too long
+    assert "B" not in seen

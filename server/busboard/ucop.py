@@ -56,7 +56,9 @@ _CLOCK = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*([ap])\.?m\.?\s*$", re.I)
 
 
 def clock_to_epoch(text: str, service_date: str, near: float, tz: ZoneInfo) -> int | None:
-    """'7:45 pm' -> epoch, picking whichever day around the service date is closest to `near`."""
+    """'7:45 pm' -> epoch. A time on service date D falls on D, or on D+1 for trips running past
+    midnight; of those, the one closest to `near`. Never D-1: at stops with little service UCOP's
+    list reaches into tomorrow, and tomorrow's 8:47 am must not be read as today's."""
     m = _CLOCK.match(text or "")
     if not m:
         return None
@@ -65,7 +67,7 @@ def clock_to_epoch(text: str, service_date: str, near: float, tz: ZoneInfo) -> i
         hour += 12
     base = dt.datetime.strptime(service_date, "%Y%m%d").date()
     candidates = []
-    for offset in (-1, 0, 1):
+    for offset in (0, 1):
         d = base + dt.timedelta(days=offset)
         candidates.append(int(dt.datetime(d.year, d.month, d.day, hour, minute, tzinfo=tz).timestamp()))
     return min(candidates, key=lambda c: abs(c - near))

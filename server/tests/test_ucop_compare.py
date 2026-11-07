@@ -87,3 +87,35 @@ def test_store_roundtrip(tmp_path):
     snap, latest = store.latest("1117")
     assert snap["ucop_count"] == 2 and len(latest) == 2
     assert [r["trip_id"] for r in store.recent_mismatches("1117", now - 10)] == ["B"]
+
+
+def test_diff_reasons():
+    from busboard.compare import CompareRow
+    base = dict(service_date="20261106", trip_id="T", route="4", category=TIME_DIFF, our_est=0, ucop_est=600,
+                our_src=2, rt_updates=10, ucop_status="late")
+    assert CompareRow(**base, stale_vehicle=True, held_at_timepoint=True).diff_reason == "stale_vehicle"
+    assert CompareRow(**base, held_at_timepoint=True).diff_reason == "held_at_timepoint"
+    assert CompareRow(**{**base, "rt_updates": None, "our_src": 0}).diff_reason == "gone_from_feed"
+    assert CompareRow(**{**base, "rt_updates": None, "our_src": 0, "ucop_status": None}).diff_reason == "src0"
+    assert CompareRow(**base).diff_reason == "src2"
+    assert CompareRow(**{**base, "category": MATCH}).diff_reason is None
+
+
+def test_window_edges_are_not_counted():
+    """Seen overnight: trips exactly 3 h out listed only by UCOP (it truncates to the minute), and a
+    bus we still showed 45 s after it left while UCOP had dropped it."""
+    now = local(2026, 11, 7, 2, 17, 10)
+    edge = arr("EDGE", local(2026, 11, 7, 5, 17))  # really 5:17:30, past our 3 h window ending 5:17:10
+    gone = dep("GONE", now - 45)
+    later = arr("LATER", now + 3600)
+    rows = {r.trip_id: r for r in compare([gone], [edge, later], now, tolerance_s=120, past_grace_s=60,
+                                          window_ahead_s=3 * 3600)}
+    assert "EDGE" not in rows and "GONE" not in rows
+
+
+def test_clock_on_tomorrows_service_date_stays_tomorrow():
+    # Seen at stop 586 on a Saturday morning: UCOP's list reached Sunday's 8:47 am trip
+    near = local(2026, 11, 7, 7, 55)
+    assert clock_to_epoch("8:47 am", "20261108", near, TZ) == local(2026, 11, 8, 8, 47)
+    # First trips of the day just after midnight still land on their own date
+    assert clock_to_epoch("12:30 am", "20261107", local(2026, 11, 6, 23, 50), TZ) == local(2026, 11, 7, 0, 30)

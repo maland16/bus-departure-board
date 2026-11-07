@@ -1,9 +1,11 @@
 # Departure board server
 
 Builds the departure list for a stop directly from GP Metro's GTFS feeds, so the board won't need UCOP's
-rendered bitmap. For now it runs next to UCOP and compares the two, for the stops listed in `config.toml`.
+rendered bitmap. For now it runs next to UCOP and compares the two, for the stops listed in `config.toml`. It also
+watches vehicle positions to see when buses actually leave each stop, so predictions (ours and UCOP's) can be scored
+against reality. That works for any stop, whether or not UCOP covers it.
 
-- `GET /compare` (also `/`): one row per stop with its 24-hour agreement with UCOP.
+- `GET /compare` (also `/`): one row per stop with its 24-hour agreement with UCOP and accuracy against actual departures.
 - `GET /stops/1117/departures`: the small JSON the board will eventually fetch (~0.6 KB instead of a 48 KB BMP).
   Add `?debug=1` for every field.
 - `GET /stops/1117/display.bmp`: our own 800x480 1-bit BMP, in the format the current firmware already accepts.
@@ -17,11 +19,17 @@ For each scheduled visit to the stop, the first rule that applies:
 | `src` | Meaning |
 | - | - |
 | 2 | The realtime feed predicts this stop. Matched on `stop_sequence`, since some trips visit the stop twice |
-| 1 | The trip only has a prediction for its first stop, so the schedule is shifted by that delay |
+| 1 | No prediction for this stop: the schedule is shifted by the delay at the nearest stop that has one, preferring an earlier stop (usually the first) |
 | 0 | Schedule only |
 
-If the trip's bus hasn't reported its position in 5 minutes, its prediction is ignored. These "ghost" buses appear
-wildly late in the feed. Departures more than 60 s in the past are dropped.
+- If the trip's bus hasn't reported its position in 15 minutes, its prediction is ignored. These "ghost" buses appear
+  wildly late in the feed.
+- At timepoints, a departure is never shown earlier than scheduled: buses wait there, even when the feed says
+  otherwise. This doesn't apply where a trip ends.
+- Trips that drop out of the feed for a poll keep their last prediction for 2 minutes.
+- Optional, off by default (`block_propagation`): a trip can't start before its bus finishes the previous trip on the
+  same block. Re-measure with `busboard.accuracy` before turning it on.
+- Departures more than 60 s in the past are dropped.
 
 GP Metro's feeds: the static zip is rebuilt nightly with a rolling ~30-day `calendar_dates.txt`. Realtime predictions
 are absolute times. About a quarter of trips have no headsign, so the trip's last stop name is used instead.
@@ -39,6 +47,34 @@ viewed. Departures are matched on the GTFS trip ID in UCOP's `data-key` attribut
 - `ucop_departed`: UCOP keeps departed buses listed and we don't. Not counted.
 - `ours_terminating`: a trip ending at this stop that only we list. UCOP caps its lists at 40 entries and leaves many
   of these out at hubs, and our board doesn't show them. Not counted.
+- `no_ucop`: UCOP's page couldn't be fetched. Our departures are still logged for accuracy scoring. Not counted.
+
+Each `time_diff` also gets a `diff_reason`. `stale_vehicle`, `stale_block`, `held_at_timepoint` and
+`gone_from_feed` are cases where UCOP shows something stale or impossible. Anything left over (`src2`, `src1`,
+`src0`) is worth investigating.
+
+UCOP has stop pages but no display image for 586, 585, 148 and 147. The comparison works the same; the stop page
+just shows a note in place of UCOP's image.
+
+## Accuracy against actual departures
+
+Each realtime poll (every 30 s), the server tracks every bus on a trip that serves a watched stop. GP Metro's vehicles
+report the stop they're at or heading to, so a stop is departed once the bus reports a later one. Each departure goes
+into `observed_departures` in `compare.db`, with the window it happened in (`departed_after`, `departed_by`). The
+comparison pages score predictions made 0-5, 5-20 and 20-60 minutes before each departure.
+
+To test a change to the GTFS handling against real outcomes, replay the archive through it:
+
+```sh
+uv run python -m busboard.accuracy data-pi                     # by minutes before departure, ours vs UCOP
+uv run python -m busboard.accuracy data-pi --by src            # or --by stop / route
+uv run python -m busboard.accuracy data-pi --config trial.toml # e.g. with block_propagation = true
+uv run python -m busboard.accuracy data-pi --rows acc.jsonl    # every scored prediction
+```
+
+Actual departures come from the live observations where available (30 s resolution). Otherwise they're worked out
+from the archived vehicle positions (2 min resolution). Stops added to the config later can be scored on older
+archives too, since our predictions only need the realtime feeds.
 
 ## Logs for debugging the GTFS handling
 
@@ -46,8 +82,9 @@ Everything is under `data/` on the Pi (`~/busboard/data`):
 
 | Path | What | Kept |
 | - | - | - |
-| `compare.db` | Every comparison row, with debug columns: `our_src`, `stop_sequence`, `timepoint`, `vehicle_id`, `vehicle_age_s`, `rt_updates` (stop updates the trip had in the feed), `origin_delay_s`, UCOP's status text, and the `archive` directory of the inputs | 14 days |
-| `archive/YYYYMMDD/HHMMSS/` | The exact inputs of each comparison: both realtime feeds and every stop's UCOP page (gzipped, ~96 KB, ~70 MB/day) | 7 days |
+| `compare.db` `observed_departures` | When buses actually left each watched stop | 14 days |
+| `compare.db` `rows` | Every comparison row, with debug columns: `our_src`, `stop_sequence`, `timepoint`, `vehicle_id`, `vehicle_age_s`, `rt_updates` (stop updates the trip had in the feed), `origin_delay_s`, UCOP's status text, and the `archive` directory of the inputs | 14 days |
+| `archive/YYYYMMDD/HHMMSS/` | The exact inputs of each comparison: both realtime feeds and every stop's UCOP page (gzipped, ~136 KB for 14 stops, ~100 MB/day) | 7 days |
 | `archive/static/` | Every static feed version seen | 30 versions |
 | `logs/events-YYYYMMDD.jsonl` | Static rebuilds (incl. how many trip IDs survived from the previous version), feed errors and recoveries, trip-ID match dips (with a sample of unmatched IDs), UCOP errors | 14 days |
 

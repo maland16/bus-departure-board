@@ -32,6 +32,8 @@ class VehicleRT:
     trip_id: str
     timestamp: int  # when the vehicle last reported its position
     stop_id: str
+    # GTFS-RT VehicleStopStatus for stop_id: 0 INCOMING_AT, 1 STOPPED_AT, 2 IN_TRANSIT_TO
+    status: int = 2
 
 
 @dataclass
@@ -88,14 +90,36 @@ def parse_vehicle_positions(data: bytes) -> tuple[int, dict[str, VehicleRT]]:
             trip_id=v.trip.trip_id,
             timestamp=v.timestamp or msg.header.timestamp,
             stop_id=v.stop_id,
+            status=v.current_status,
         )
     return msg.header.timestamp, out
 
 
+def carry_over_missing_trips(
+    new_trips: dict[str, TripRT], last_seen: dict[str, tuple[TripRT, float]], now: float, hold_s: float
+) -> dict[str, TripRT]:
+    """Trips occasionally vanish from one TripUpdate fetch and come back on the next. Keep a trip
+    that was seen within hold_s, rather than dropping it to the schedule for a poll or two.
+    Updates `last_seen` in place."""
+    merged = dict(new_trips)
+    for tid, (trt, seen_at) in list(last_seen.items()):
+        if tid in new_trips:
+            continue
+        if now - seen_at <= hold_s:
+            merged[tid] = trt
+        else:
+            del last_seen[tid]
+    for tid, trt in new_trips.items():
+        last_seen[tid] = (trt, now)
+    return merged
+
+
 class RealtimeFeed:
-    def __init__(self, trip_updates_url: str, vehicle_positions_url: str):
+    def __init__(self, trip_updates_url: str, vehicle_positions_url: str, hold_missing_trips_s: float = 0):
         self.trip_updates_url = trip_updates_url
         self.vehicle_positions_url = vehicle_positions_url
+        self.hold_missing_trips_s = hold_missing_trips_s
+        self._last_seen: dict[str, tuple[TripRT, float]] = {}
         self.snapshot = RealtimeSnapshot()
         self.last_error: str | None = None
         self._client = httpx.Client(timeout=20, headers={"User-Agent": USER_AGENT})
@@ -108,8 +132,10 @@ class RealtimeFeed:
         try:
             resp = self._client.get(self.trip_updates_url)
             resp.raise_for_status()
-            new.trip_updates_header_ts, new.trips = parse_trip_updates(resp.content)
+            new.trip_updates_header_ts, trips = parse_trip_updates(resp.content)
             new.trip_updates_fetched_at = time.time()
+            new.trips = carry_over_missing_trips(trips, self._last_seen, new.trip_updates_fetched_at,
+                                                 self.hold_missing_trips_s)
             new.trip_updates_raw = resp.content
         except Exception as e:
             errors.append(f"TripUpdate: {type(e).__name__}: {e}")

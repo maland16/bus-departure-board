@@ -15,9 +15,11 @@ class Config:
     vehicle_positions_url: str
     static_check_interval_s: int
     realtime_poll_interval_s: int
+    realtime_hold_missing_s: int
     window_ahead_s: int
     past_grace_s: int
     stale_vehicle_s: int
+    block_layover_s: int | None
     board_rows: int
     ucop_base_url: str
     ucop_display_name: str
@@ -43,9 +45,11 @@ def load_config(path: Path | None = None) -> Config:
         vehicle_positions_url=feeds["vehicle_positions_url"],
         static_check_interval_s=feeds["static_check_interval_s"],
         realtime_poll_interval_s=feeds["realtime_poll_interval_s"],
+        realtime_hold_missing_s=feeds.get("realtime_hold_missing_s", 0),
         window_ahead_s=deps["window_ahead_s"],
         past_grace_s=deps["past_grace_s"],
         stale_vehicle_s=deps["stale_vehicle_s"],
+        block_layover_s=deps.get("block_layover_s", 0) if deps.get("block_propagation", False) else None,
         board_rows=deps["board_rows"],
         ucop_base_url=ucop["base_url"].rstrip("/"),
         ucop_display_name=ucop["display_name"],

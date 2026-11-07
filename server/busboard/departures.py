@@ -3,10 +3,19 @@
 For each scheduled visit, the first rule that applies sets the estimate:
   src=2  the realtime feed predicts this exact stop (matched on stop_sequence, since some
          trips visit a stop twice)
-  src=1  the trip only has a prediction for its first stop: shift the schedule by that delay
+  src=1  no prediction for this stop: shift the schedule by the delay at the nearest stop that
+         has one, preferring an earlier stop (usually the first stop: about half of the trips
+         that haven't started only have a prediction for it)
   src=0  schedule only
-A prediction is ignored (src=0, stale_vehicle) when the trip's vehicle hasn't reported its
-position recently; those "ghost" buses show up as wildly late in the feed.
+With block propagation on, a trip without a prediction for this stop also can't start before
+the bus finishes its previous trip on the same block: the estimate is at least the previous
+trip's predicted end plus the minimum layover (block_delay_s; still src=1).
+Then:
+- A prediction is ignored (src=0, stale_vehicle) when the trip's vehicle hasn't reported its
+  position recently; those "ghost" buses show up as wildly late in the feed.
+- At timepoints the estimate is never earlier than the schedule (held_at_timepoint): buses
+  wait there. Seen at Metro Pulse, where the feed predicted waiting buses leaving up to 19 min
+  early and every one left on schedule. Not applied where the trip ends (an arrival).
 """
 
 from __future__ import annotations
@@ -50,6 +59,9 @@ class Departure:
     rt_updates: int | None = None
     origin_delay_s: int | None = None
     timepoint: bool = True
+    ref_stop_sequence: int | None = None  # for src=1: the stop whose delay was applied
+    held_at_timepoint: bool = False
+    block_delay_s: int | None = None  # lateness carried over from the previous trip on the block
 
     @property
     def delay_s(self) -> int:
@@ -70,7 +82,10 @@ def compute_departures(
     window_ahead_s: int,
     past_grace_s: int,
     stale_vehicle_s: int,
+    block_layover_s: int | None = None,
 ) -> list[Departure]:
+    """block_layover_s: minimum time between a bus finishing a trip and starting its next one;
+    None turns block propagation off."""
     stop_id = index.stop_id_for(stop_code)
     if stop_id is None:
         return []
@@ -86,8 +101,9 @@ def compute_departures(
         trip = sv.trip
         trt = realtime.trips.get(trip.trip_id)
         est, src = sv.sched, SRC_SCHEDULE
-        origin_delay = None
+        origin_delay = ref_seq = None
         if trt:
+            base = sv.sched - sv.visit.departure_secs  # the service day's base, as epoch
             o = trt.stop_times.get(trip.origin_stop_sequence)
             origin_sched = index.origin_sched(trip, sv.service_date)
             if o and abs(o - origin_sched) < MAX_RT_OFFSET_S:
@@ -95,14 +111,27 @@ def compute_departures(
             t = trt.stop_times.get(sv.visit.stop_sequence)
             if t and abs(t - sv.sched) < MAX_RT_OFFSET_S:
                 est, src = t, SRC_STOP
-            elif origin_delay is not None:
-                est, src = sv.sched + origin_delay, SRC_ORIGIN
+            else:
+                ref = _nearest_delay(index, trip.trip_id, trt.stop_times, sv.visit.stop_sequence, base)
+                if ref is not None:
+                    ref_seq, delay = ref
+                    est, src = sv.sched + delay, SRC_ORIGIN
+
+        block_delay = None
+        if block_layover_s is not None and src != SRC_STOP:
+            block_delay = _block_delay(index, realtime, trip, sv, now, stale_vehicle_s, block_layover_s)
+            if block_delay is not None and sv.sched + block_delay > est:
+                est, src = sv.sched + block_delay, SRC_ORIGIN
 
         vehicle = realtime.vehicles_by_trip.get(trip.trip_id)
         vehicle_age = int(now - vehicle.timestamp) if vehicle else None
         stale = vehicle_age is not None and vehicle_age > stale_vehicle_s
         if stale and src != SRC_SCHEDULE:
             est, src = sv.sched, SRC_SCHEDULE
+
+        held = sv.visit.timepoint and not sv.ends_here and est < sv.sched
+        if held:
+            est = sv.sched
 
         if est < now - past_grace_s or est > now + window_ahead_s:
             continue
@@ -130,10 +159,53 @@ def compute_departures(
                 rt_updates=len(trt.stop_times) if trt else None,
                 origin_delay_s=origin_delay,
                 timepoint=sv.visit.timepoint,
+                ref_stop_sequence=ref_seq,
+                held_at_timepoint=held,
+                block_delay_s=block_delay,
             )
         )
     out.sort(key=lambda d: (d.est, d.route))
     return out
+
+
+def _nearest_delay(index: StaticIndex, trip_id: str, stop_times: dict[int, int], seq: int, base: int
+                   ) -> tuple[int, int] | None:
+    """(stop_sequence, delay) from the closest earlier stop with a prediction, else the closest later one."""
+    before = [s for s in stop_times if s < seq]
+    after = [s for s in stop_times if s > seq]
+    for ref in ([max(before)] if before else []) + ([min(after)] if after else []):
+        secs = index.stop_sched_secs(trip_id, ref)
+        if secs is not None:
+            delay = stop_times[ref] - (base + secs)
+            if abs(delay) < MAX_RT_OFFSET_S:
+                return ref, delay
+    return None
+
+
+def _block_delay(index: StaticIndex, realtime: RealtimeSnapshot, trip, sv, now: int, stale_vehicle_s: int,
+                 layover_s: int) -> int | None:
+    """How late this trip will start because its bus is still finishing the previous trip on the block."""
+    prev = index.previous_trip_on_block(trip)
+    if prev is None:
+        return None
+    prt = realtime.trips.get(prev.trip_id)
+    if not prt or not prt.stop_times:
+        return None
+    pveh = realtime.vehicles_by_trip.get(prev.trip_id)
+    if pveh is not None and now - pveh.timestamp > stale_vehicle_s:
+        return None  # a ghost bus's lateness isn't real
+    base = sv.sched - sv.visit.departure_secs  # same service day for both trips
+    last_seq = max(prt.stop_times)
+    last_secs = index.stop_sched_secs(prev.trip_id, last_seq)
+    end_secs = index.trip_end_secs(prev.trip_id)
+    if last_secs is None or end_secs is None:
+        return None
+    prev_delay = prt.stop_times[last_seq] - (base + last_secs)
+    if abs(prev_delay) > MAX_RT_OFFSET_S:
+        return None
+    prev_end = base + end_secs + prev_delay
+    start_sched = base + trip.origin_departure_secs
+    return max(0, prev_end + layover_s - start_sched)
 
 
 def board_departures(departures: list[Departure], rows: int) -> list[Departure]:

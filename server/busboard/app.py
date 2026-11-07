@@ -16,8 +16,9 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .archive import EventLog, InputArchive
-from .compare import CompareStore, compare_stop
+from .compare import DIFF_REASONS, EXPECTED_REASONS, CompareStore, compare_stop
 from .config import load_config
+from .observe import DepartureObserver
 from .departures import board_departures, compute_departures
 from .payload import build_payload
 from .realtime import RealtimeFeed
@@ -31,7 +32,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)  # otherwise every 30 s pol
 
 cfg = load_config()
 static = StaticFeed(cfg.static_url, cfg.data_dir, cfg.stops)
-realtime = RealtimeFeed(cfg.trip_updates_url, cfg.vehicle_positions_url)
+realtime = RealtimeFeed(cfg.trip_updates_url, cfg.vehicle_positions_url, cfg.realtime_hold_missing_s)
 store = CompareStore(cfg.data_dir / "compare.db")
 events = EventLog(cfg.data_dir)
 archive = InputArchive(cfg.data_dir)
@@ -41,6 +42,8 @@ _ucop_client: UcopClient | None = None
 _static_name: str | None = None  # archived file name of the static version behind the current index
 _last_rt_error: str | None = None
 _match_dip_logged = False
+_ucop_error_by_stop: dict[str, str | None] = {}
+observer: DepartureObserver | None = None
 UCOP_BMP_MAX_AGE_S = 60
 
 
@@ -76,12 +79,14 @@ def _departures(code: str, now: int, past_grace_s: int | None = None):
         window_ahead_s=cfg.window_ahead_s,
         past_grace_s=cfg.past_grace_s if past_grace_s is None else past_grace_s,
         stale_vehicle_s=cfg.stale_vehicle_s,
+        block_layover_s=cfg.block_layover_s,
     )
 
 
 def _stop_name(code: str) -> str:
     idx = _index()
-    return idx.stop_names.get(idx.stop_id_for(code) or "", code)
+    stop_id = idx.stop_id_for(code)
+    return idx.stop_display_name(stop_id) if stop_id else code
 
 
 def trip_match_rate() -> tuple[int, int]:
@@ -153,6 +158,24 @@ def _realtime_tick():
         previous = static.index
         if static.refresh(force=True):
             _on_static_index(previous, "trip_match_dip")
+    _observe_departures()
+
+
+def _observe_departures():
+    """Record when buses actually left the watched stops (ground truth for accuracy)."""
+    global observer
+    idx = static.index
+    if idx is None:
+        return
+    stop_codes = {idx.stop_id_for(c): c for c in _active_stops()}
+    if observer is None or observer.stop_ids != set(stop_codes):
+        observer = DepartureObserver(set(stop_codes))
+    seen = observer.update(idx, realtime.snapshot.vehicles_by_trip)
+    if seen:
+        routes = {o.trip_id: idx.routes[idx.trips[o.trip_id].route_id].short_name
+                  for o in seen if o.trip_id in idx.trips and idx.trips[o.trip_id].route_id in idx.routes}
+        store.record_departures(seen, stop_codes, routes)
+    observer.forget_older_than(int(time.time()) - 2 * 3600)
 
 
 def _compare_tick():
@@ -183,10 +206,12 @@ def _compare_tick():
     for code, snap in pages.items():
         ucop_latest[code] = snap
         t = int(snap.fetched_at)
-        ours, rows = compare_stop(idx, rt_snap, snap.arrivals, code, t, cfg)
-        if snap.error and not snap.arrivals:
-            rows = []
-            events.write("ucop_error", stop=code, error=snap.error)
+        no_page = bool(snap.error) and not snap.arrivals
+        # Without UCOP's page, still log our departures so they can be scored against actual ones
+        ours, rows = compare_stop(idx, rt_snap, None if no_page else snap.arrivals, code, t, cfg)
+        if _ucop_error_by_stop.get(code) != snap.error:  # log changes, not every failed fetch
+            events.write("ucop_error" if snap.error else "ucop_recovered", stop=code, error=snap.error)
+            _ucop_error_by_stop[code] = snap.error
         store.record(code, t, rows, len(snap.arrivals), len(ours), snap.error, archive_rel)
     store.prune(cfg.retention_days)
     archive.prune(cfg.archive_days)
@@ -320,9 +345,7 @@ def _summary_table(s: dict) -> str:
             f"{c['trips'] or 0}",
             f"{_pct(listed, everything)} ({listed}/{everything})",
             f"{_pct(c['match'], listed)} ({c['match'] or 0}/{listed})",
-            f"{c['time_diff_stale_vehicle'] or 0}",
-            f"{c['time_diff_stale_block'] or 0}",
-            f"{c['time_diff_src2'] or 0} / {c['time_diff_src1'] or 0} / {c['time_diff_src0'] or 0}",
+            *(f"{c['diff_' + r] or 0}" for r in DIFF_REASONS),
             f"{c['ours_only'] or 0}",
             f"{c['ucop_only'] or 0}",
             f"{c['src2'] or 0} / {c['src1'] or 0} / {c['src0'] or 0}",
@@ -330,13 +353,37 @@ def _summary_table(s: dict) -> str:
         ]
     labels = [
         "Snapshots", "Distinct trips", "Listed by both", "Times within tolerance (of listed by both)",
-        "Time diffs: stale vehicle (expected)", "Time diffs: stale block",
-        "Other time diffs by our source: stop / origin / sched", "Only in ours", "Only in UCOP",
+        *(f"Time diffs: {d}" + (" (expected)" if r in EXPECTED_REASONS else "") for r, d in DIFF_REASONS.items()),
+        "Only in ours", "Only in UCOP",
         "Our source when both list it: stop / origin / sched", "Headsign differs",
     ]
     a, n = col(s["all"]), col(s["near_term"])
     body = "".join(f"<tr><th>{html.escape(l)}</th><td>{x}</td><td>{y}</td></tr>" for l, x, y in zip(labels, a, n))
     return f"<table><tr><th></th><th>All rows</th><th>Due within 15 min</th></tr>{body}</table>"
+
+
+def _err(mae, n) -> str:
+    return "–" if not n or mae is None else f"{mae / 60:.1f} min (n={n})"
+
+
+def _accuracy_table(acc: dict) -> str:
+    def pct(x):
+        return "–" if x is None else f"{100 * x:.0f}%"
+
+    def bias(x):
+        return "–" if x is None else f"{x / 60:+.1f} min"
+
+    def mins(x):
+        return "–" if x is None else f"{x / 60:.1f} min"
+
+    body = "".join(
+        f"<tr><th>{html.escape(b)} before</th><td>{a['n']}</td><td>{mins(a['mae'])}</td>"
+        f"<td>{bias(a['bias'])}</td><td>{pct(a['w1'])}</td><td>{pct(a['w2'])}</td>"
+        f"<td>{a['ucop_n']}</td><td>{mins(a['ucop_mae'])}</td><td>{pct(a['ucop_w1'])}</td><td>{pct(a['ucop_w2'])}</td></tr>"
+        for b, a in acc.items())
+    return ("<table><tr><th></th><th>Ours: n</th><th>Mean abs error</th><th>Bias</th><th>Within 1 min</th>"
+            "<th>Within 2 min</th><th>UCOP: n</th><th>Mean abs error</th><th>Within 1 min</th><th>Within 2 min</th></tr>"
+            f"{body}</table>")
 
 
 def _rows_table(rows: list[dict], tz, with_ts=False) -> str:
@@ -346,7 +393,8 @@ def _rows_table(rows: list[dict], tz, with_ts=False) -> str:
     )
     out = []
     for r in rows:
-        flags = " ".join(f for f, on in (("stale-vehicle", r["stale_vehicle"]), ("stale-block", r["stale_block"])) if on)
+        flags = " ".join(f for f, on in (("stale-vehicle", r["stale_vehicle"]), ("stale-block", r["stale_block"]),
+                                         ("held-at-timepoint", r.get("held_at_timepoint"))) if on)
         diff = "" if r["diff_s"] is None else f"{r['diff_s'] / 60:+.1f} min"
         cells = ([_fmt_time(r["ts"], tz)] if with_ts else []) + [
             r["route"], r["trip_id"], r["category"], _fmt_time(r["our_sched"] or r["ucop_sched"], tz),
@@ -381,29 +429,37 @@ def compare_overview():
     rows = []
     for code in cfg.stops:
         if idx.stop_id_for(code) is None:
-            rows.append(f"<tr><td>{html.escape(code)}</td><td colspan='8'>Not in GP Metro's current GTFS feed</td></tr>")
+            rows.append(f"<tr><td>{html.escape(code)}</td><td colspan='12'>Not in GP Metro's current GTFS feed</td></tr>")
             continue
         c = store.summary(code, now - 86400)["all"]
         listed = (c["match"] or 0) + (c["time_diff"] or 0)
         everything = listed + (c["ours_only"] or 0) + (c["ucop_only"] or 0)
-        other_diffs = (c["time_diff"] or 0) - (c["time_diff_stale_vehicle"] or 0) - (c["time_diff_stale_block"] or 0)
+        expected = sum(c["diff_" + r] or 0 for r in EXPECTED_REASONS)
+        other_diffs = (c["time_diff"] or 0) - expected
+        acc = store.accuracy(code, now - 86400, buckets=((5, 20),))["5-20 min"]
         cells = [
             f"<a href='/compare/{code}'>{code}</a>", html.escape(_stop_name(code)), str(c["snapshots"] or 0),
-            _pct(listed, everything), _pct(c["match"], listed), str(c["time_diff_stale_vehicle"] or 0),
-            str(c["time_diff_stale_block"] or 0), str(other_diffs),
+            _pct(listed, everything), _pct(c["match"], listed),
+            _pct((c["match"] or 0) + expected, listed), str(expected), str(other_diffs),
             f"{c['ours_only'] or 0} / {c['ucop_only'] or 0}", str(c["headsign_differs"] or 0),
+            str(store.observed_count(code, now - 86400)), _err(acc["mae"], acc["n"]), _err(acc["ucop_mae"], acc["ucop_n"]),
         ]
         rows.append("<tr>" + "".join(f"<td>{x}</td>" for x in cells) + "</tr>")
-    head = ("<tr><th>Stop</th><th>Name</th><th>Snapshots</th><th>Listed by both</th><th>Times match</th>"
-            "<th>Diffs: stale vehicle</th><th>Diffs: stale block</th><th>Other diffs</th>"
-            "<th>Only ours / only UCOP</th><th>Headsign differs</th></tr>")
+    head = ("<tr><th rowspan=2>Stop</th><th rowspan=2>Name</th><th colspan=8>Comparison with UCOP</th>"
+            "<th colspan=3>Accuracy vs actual departures</th></tr>"
+            "<tr><th>Snapshots</th><th>Listed by both</th><th>Times match</th>"
+            "<th>Times match or UCOP is stale</th><th>Expected diffs</th><th>Other diffs</th>"
+            "<th>Only ours / only UCOP</th><th>Headsign differs</th>"
+            "<th>Departures seen</th><th>Our error 5-20 min ahead</th><th>UCOP's</th></tr>")
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="120"><title>Board comparison</title>{PAGE_STYLE}</head><body>
 <h1>Our departures vs UCOP, last 24 hours</h1>
 <p>Counts are comparison rows: each trip is compared every {cfg.compare_interval_s // 60} min while both lists show it.
- Times match if within {cfg.match_tolerance_s} s. "Stale vehicle" differences are deliberate (we ignore predictions
- from buses that stopped reporting).</p>
+ Times match if within {cfg.match_tolerance_s} s. "Expected" differences are where UCOP shows something stale (ghost
+ buses, trips gone from the feed, buses leaving a timepoint early).
+ <b>Accuracy</b> is against when buses actually left, worked out from vehicle positions: mean absolute error of
+ predictions made 5-20 minutes before departure.</p>
 <div class="wrap"><table>{head}{''.join(rows)}</table></div>
 </body></html>"""
 
@@ -426,16 +482,22 @@ def compare_page(code: str):
 <meta http-equiv="refresh" content="60"><title>Board comparison</title>{PAGE_STYLE}</head><body>
 <p><a href="/compare">&larr; All stops</a></p>
 <h1>Stop {code}: {html.escape(_stop_name(code))}</h1>
-<p>Our board vs UCOP. Times match if within {cfg.match_tolerance_s} s (UCOP rounds to the minute).
+<p>Our board vs UCOP. Times match if within {cfg.match_tolerance_s} s (UCOP truncates to the minute).
  Our source: <b>stop</b> = predicted for this stop, <b>origin</b> = estimated from the trip's first stop,
  <b>sched</b> = schedule only. <b>stale-vehicle</b> = we ignored the prediction because the bus hasn't
  reported its position for over {cfg.stale_vehicle_s // 60} min.</p>
 <div class="imgs">
  <figure><img src="/stops/{code}/preview.png?source=ours&t={now}" alt="Our board"><figcaption>Ours (now)</figcaption></figure>
- <figure><img src="/stops/{code}/preview.png?source=ucop&t={now}" alt="UCOP board"><figcaption>UCOP (fetched when this page loads)</figcaption></figure>
+ <figure><img src="/stops/{code}/preview.png?source=ucop&t={now}" alt="UCOP board"
+   onerror="this.replaceWith(Object.assign(document.createElement('p'), {{textContent: 'UCOP has no display image for this stop.'}}))">
+   <figcaption>UCOP (fetched when this page loads)</figcaption></figure>
 </div>
 <h2>Last 24 hours</h2>
 {_summary_table(day)}
+<h2>Accuracy vs actual departures (last 24 h)</h2>
+<p>{store.observed_count(code, now - 86400)} departures seen in vehicle positions. Error = predicted minus actual;
+ each comparison snapshot counts once per departure it showed.</p>
+{_accuracy_table(store.accuracy(code, now - 86400))}
 <h2>Latest comparison</h2>
 <p>{snap_line}</p>
 <div class="wrap">{_rows_table(rows, tz)}</div>
