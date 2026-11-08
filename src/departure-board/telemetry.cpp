@@ -4,7 +4,6 @@
 #include "wifi-driver.h"
 #include "battery-driver.h"
 #include "deep-sleep-driver.h"
-#include "rtc-driver.h"
 #include "task-supervisor.h"
 #include "wake-stats.h"
 #include <HTTPClient.h>
@@ -41,30 +40,7 @@ static String escapeTag(const String& in) {
 // Non-finite floats would produce an invalid line, so swap in a sentinel
 static float sane(float v) { return isfinite(v) ? v : -1.0f; }
 
-void sendTelemetryWithRetries(void) {
-  // Retrying can't help without wifi, so don't burn battery waiting
-  if (!isWifiConnected()) {
-    Serial.println("No wifi; skipping telemetry");
-    return;
-  }
-
-  // One initial attempt plus TELEMETRY_RETRIES retries
-  for (int attempt = 0; attempt <= TELEMETRY_RETRIES; attempt++) {
-    if (sendTelemetry()) {
-      Serial.println("Telemetry sent successfully");
-      return;
-    }
-
-    if (attempt < TELEMETRY_RETRIES) {
-      Serial.printf("Telemetry failed; retrying in %d ms\n", TELEMETRY_RETRY_DELAY_MS);
-      delay(TELEMETRY_RETRY_DELAY_MS);
-    }
-  }
-
-  Serial.printf("Telemetry failed after %d attempts; giving up\n", TELEMETRY_RETRIES + 1);
-}
-
-bool sendTelemetry() {
+static bool sendTelemetry() {
   if (!isWifiConnected()) return false;
 
   float solarV   = sane(getSolarVoltage());
@@ -120,4 +96,27 @@ bool sendTelemetry() {
   bool ok = (code >= 200 && code < 300);
   if (!ok) Serial.printf("Telemetry failed: %d\n", code);
   return ok;
+}
+
+void sendTelemetryWithRetries(void) {
+  // Retrying can't help without wifi, so don't burn battery waiting
+  if (!isWifiConnected()) {
+    Serial.println("No wifi; skipping telemetry");
+    return;
+  }
+
+  // One initial attempt plus TELEMETRY_RETRIES retries
+  for (int attempt = 0; attempt <= TELEMETRY_RETRIES; attempt++) {
+    if (sendTelemetry()) {
+      Serial.println("Telemetry sent successfully");
+      return;
+    }
+
+    if (attempt < TELEMETRY_RETRIES) {
+      Serial.printf("Telemetry failed; retrying in %d ms\n", TELEMETRY_RETRY_DELAY_MS);
+      delay(TELEMETRY_RETRY_DELAY_MS);
+    }
+  }
+
+  Serial.printf("Telemetry failed after %d attempts; giving up\n", TELEMETRY_RETRIES + 1);
 }

@@ -1,11 +1,7 @@
 #include "display-driver.h"
 
-#include "GxEPD2_display_selection_new_style.h"
-
-#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <ESP32Time.h>
 #include <esp_rom_crc.h>
 
 #include <Fonts/FreeSans9pt7b.h>
@@ -25,7 +21,17 @@
 // Keep showing a departure this long after its estimated time, like the server does
 #define PAST_GRACE_S (60)
 
-HTTPClient http;
+// GDEM075T41WT panel, driven as a GDEY075T7 (see docs/display.md), wired to
+// the ESP32-S3 Feather. The page buffer is full height (48 KB), so every draw
+// is a single page.
+#define EPD_CS (11)
+#define EPD_DC (10)
+#define EPD_RST (9)
+#define EPD_BUSY (6)
+static GxEPD2_BW<GxEPD2_750_GDEY075T7, GxEPD2_750_GDEY075T7::HEIGHT>
+    display(GxEPD2_750_GDEY075T7(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
+
+static HTTPClient http;
 
 // ---- Departures from the last good download, kept across deep sleep so the
 // board can keep counting down on its own clock if a download fails ----

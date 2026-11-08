@@ -1,16 +1,7 @@
-#define ENABLE_GxEPD2_GFX 0
-
-#include <ESP32Time.h>
 #include <esp_task_wdt.h>
 #if ARDUINO_USB_MODE == 0
 #include <USB.h>
 #endif
-
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <WiFiGeneric.h>
-#include <WiFiMulti.h>
-#include <WiFiClientSecure.h>
 
 #include "battery-driver.h"
 #include "credentials.h"
@@ -20,7 +11,6 @@
 #include "task-supervisor.h"
 #include "wifi-driver.h"
 #include "telemetry.h"
-#include "wake-stats.h"
 
 #define SERIAL_BAUD (115200)
 

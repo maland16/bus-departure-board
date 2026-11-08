@@ -29,7 +29,7 @@ The product page also notes that dense graphics can look grainy at 30-50°C, and
 
 ## Wiring (Adafruit ESP32-S3 Feather)
 
-From `src/departure-board/GxEPD2_display_selection_new_style.h`:
+From the `EPD_*` defines in `src/departure-board/display-driver.cpp`:
 
 | Display | Feather pin |
 | - | - |

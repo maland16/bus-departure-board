@@ -1,6 +1,8 @@
 #include "wifi-driver.h"
+
+#include <WiFiMulti.h>
+
 #include "credentials.h"
-#include "rtc-driver.h"
 #include "wake-stats.h"
 
 // Stream timeouts are in milliseconds (HTTPClient replaces this with its own once connected)
@@ -14,7 +16,7 @@
 #define FAST_CONNECT_TIMEOUT_MS (3000)
 
 WiFiClientSecure client;
-WiFiMulti wifiMulti;
+static WiFiMulti wifiMulti;
 
 // Saved in RTC memory so we can back off while wifi is down
 RTC_DATA_ATTR uint8_t consecutiveWifiFailures = 0;
@@ -83,6 +85,34 @@ static void saveConnectedAccessPoint(void)
   lastApChannel = WiFi.channel();
 }
 
+static void refreshWifiConnection()
+{
+  if (WiFi.status() != WL_CONNECTED){
+    if (connectToLastAccessPoint()) {
+      Serial.println("Reconnected to last access point");
+    }
+
+    // .run() connects to the strongest wifi on the list
+    if (WiFi.status() == WL_CONNECTED || wifiMulti.run(WIFI_CONNECT_TIMEOUT_MS) == WL_CONNECTED)
+    {
+      saveConnectedAccessPoint();
+
+      Serial.print("Wifi Status: ");
+      Serial.println(WiFi.status());
+      Serial.print("Connected to: ");
+      Serial.println(WiFi.SSID());
+      Serial.print("RSSI: ");
+      Serial.println(WiFi.RSSI());
+      Serial.print("IP address: ");
+      Serial.println(WiFi.localIP());
+    } else {
+      Serial.println("Failed to connect to wifi!");
+      Serial.print("Wifi Status: ");
+      Serial.println(WiFi.status());
+    }
+  }
+}
+
 void initWifi()
 {
   // Don't write the wifi config to flash on every wake-up
@@ -119,32 +149,4 @@ void initWifi()
 bool isWifiConnected()
 {
   return WiFi.status() == WL_CONNECTED;
-}
-
-void refreshWifiConnection()
-{
-  if (WiFi.status() != WL_CONNECTED){
-    if (connectToLastAccessPoint()) {
-      Serial.println("Reconnected to last access point");
-    }
-
-    // .run() connects to the strongest wifi on the list
-    if (WiFi.status() == WL_CONNECTED || wifiMulti.run(WIFI_CONNECT_TIMEOUT_MS) == WL_CONNECTED)
-    {
-      saveConnectedAccessPoint();
-
-      Serial.print("Wifi Status: ");
-      Serial.println(WiFi.status());
-      Serial.print("Connected to: ");
-      Serial.println(WiFi.SSID());
-      Serial.print("RSSI: ");
-      Serial.println(WiFi.RSSI());
-      Serial.print("IP address: ");
-      Serial.println(WiFi.localIP());
-    } else {
-      Serial.println("Failed to connect to wifi!");
-      Serial.print("Wifi Status: ");
-      Serial.println(WiFi.status());
-    }
-  }
 }
