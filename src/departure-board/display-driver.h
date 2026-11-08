@@ -11,8 +11,26 @@ void initDisplayDriver(void);
 void showUnavailableImage(const char *url, const char *reason);
 
 /**
- * @brief Grab the latest image
+ * @brief Download the stop's departures (JSON) from the board server and set
+ * the clock from the response. Keeps the previous departures on failure.
  */
-bool drawBmpFromUrl(const char *url);
+bool fetchBoardData(const char *url);
+
+/**
+ * @brief Whether there are departures to draw (from this or an earlier wake-up).
+ */
+bool haveBoardData(void);
+
+/**
+ * @brief When the server generated the departures we have (epoch s).
+ */
+uint32_t boardDataEpoch(void);
+
+/**
+ * @brief Draw the departures, counting down from the current time. With
+ * clockTimesOnly every time is shown as a clock time (for overnight).
+ * Skips the refresh if the screen would look the same.
+ */
+void drawBoard(bool clockTimesOnly);
 
 #endif // DISPLAY_DRIVER_H

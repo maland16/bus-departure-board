@@ -6,7 +6,7 @@ watches vehicle positions to see when buses actually leave each stop, so predict
 against reality. That works for any stop, whether or not UCOP covers it.
 
 - `GET /compare` (also `/`): one row per stop with its 24-hour agreement with UCOP and accuracy against actual departures.
-- `GET /stops/1117/departures`: the small JSON the board will eventually fetch (~0.6 KB instead of a 48 KB BMP).
+- `GET /stops/1117/departures`: the small JSON the boards fetch (~0.6 KB instead of a 48 KB BMP), via the published copy (see below).
   Add `?debug=1` for every field.
 - `GET /stops/1117/display.bmp`: our own 800x480 1-bit BMP, in the format the current firmware already accepts.
 - `GET /compare/1117`: our image next to UCOP's, the latest trip-by-trip comparison, and a 24-hour summary.
@@ -123,10 +123,10 @@ WHERE timepoint AND our_est < our_sched - 60 AND category IN ('match', 'time_dif
 
 ## Publishing for the boards
 
-The boards will fetch a small JSON file per stop from a static web host, instead of UCOP's 48 KB bitmap. Every 30 s
+The boards fetch a small JSON file per stop from a static web host, instead of UCOP's 48 KB bitmap. Every 30 s
 the Pi writes the files into `data/publish/v1/` and pushes them with rsync over SSH. The connection is outbound only,
 so nothing is opened on the home network. If the Pi or the home internet goes down, the files stop updating; the
-boards will see an old `now` and fall back to UCOP.
+boards will see an old `now`: they keep counting down from the last departures they have, and show a "Live tracking unavailable" screen once those are 30 minutes old.
 
 ```
 https://board.devinmalanaphy.com/v1/index.json          {"v":1,"now":...,"stops":{"1117":"Congress St + Center St",...}}

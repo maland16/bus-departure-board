@@ -14,12 +14,4 @@
 #define GC_TOKEN "your_grafana_token"
 inline constexpr char GRAFANA_DEVICE[] = "departure-board-" SERIAL_NUMBER;
 
-// Fetched with openssl s_client -showcerts -connect transit.ucop.me:443
-// Certificate chain #1, valid until Mar 12 23:59:59 2027 GMT
-const char web_cert [] PROGMEM = R"CERT(
------BEGIN CERTIFICATE-----
-replace with your transit certificate PEM contents
------END CERTIFICATE-----
-)CERT";
-
 #endif // _CREDENTIALS_H_

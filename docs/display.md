@@ -25,7 +25,7 @@ The product page also notes that dense graphics can look grainy at 30-50°C, and
 - **Driver class:** there's no GxEPD2 driver class specifically for this panel, so the firmware uses `GxEPD2_750_GDEY075T7` (also 800x480 with a UC8179). Full refreshes use the waveform stored in the panel itself (OTP), so they get this panel's own wide-temperature timing. That's why a full refresh takes about 4 s, not the 1.2 s GxEPD2 lists for the GDEY075T7.
 - **Partial refresh is untested on this panel.** GxEPD2's fast partial mode for the GDEY075T7 forces the controller's temperature setting to 110 to select a fast waveform from OTP. It's unknown whether this panel's OTP has one, and forcing the temperature turns off temperature compensation, which matters in the cold. Bench test it (including near freezing) before relying on it.
 - **Refresh timing:** GxEPD2 prints how long each refresh takes to serial, e.g. `_Update_Full : 4xxxxxx` (in microseconds).
-- **Image source:** the transit server renders the image for this panel at `/stops/<stop id>/display/gdem075t41wt/display.bmp`, as an 800 x 480 BMP.
+- **What's drawn:** the firmware downloads the stop's departures as JSON from the board server (`https://board.devinmalanaphy.com/v1/stops/<stop id>.json`, see `server/README.md`) and draws them as text with the Adafruit GFX FreeSans fonts, in portrait (`setRotation(3)`). The layout is in `drawScreen()` in `display-driver.cpp`.
 
 ## Wiring (Adafruit ESP32-S3 Feather)
 

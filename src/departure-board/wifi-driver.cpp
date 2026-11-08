@@ -112,8 +112,6 @@ void initWifi()
     consecutiveWifiFailures++;
   }
 
-  client.setCACert(web_cert);
-
   client.setTimeout(WIFI_CLIENT_TIMEOUT_MS);
   client.setHandshakeTimeout(TLS_HANDSHAKE_TIMEOUT_SEC);
 }

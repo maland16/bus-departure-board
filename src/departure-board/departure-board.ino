@@ -34,9 +34,13 @@
 #define WAKE_UP_TIME_HOUR (4) // 4AM
 #define SLEEP_TIME_HOUR (12 + 11) // 11PM
 
-#define STOP_BASE_URL "https://transit.ucop.me/stops/"
+// Departures for the stop, published by the board server (server/ in this repo)
+#define BOARD_DATA_URL "https://board.devinmalanaphy.com/v1/stops/" CONFIGURED_STOP_ID ".json"
+// The "unavailable" screen's QR code links here (UCOP has a page for every stop)
+#define STOP_PAGE_URL "https://transit.ucop.me/stops/" CONFIGURED_STOP_ID "/"
 
-// How long should we wait before considering the data on the display to be too stale
+// How old the departures (from when the server made them) can get before we
+// stop showing them. Until then a failed download just redraws the last ones.
 #define DISPLAY_STALE_SECONDS (30 * 60)
 
 // Back off how often we wake up while wifi is down, to save battery.
@@ -48,10 +52,8 @@
 #define LONG_BACKOFF_MINUTES (15)
 
 RTC_DATA_ATTR DisplayMode lastDisplayedMode = DISPLAY_MODE_NONE;
+// When the server generated the departures we last downloaded (epoch s)
 RTC_DATA_ATTR uint32_t lastDisplayUpdateEpoch = 0;
-
-static const char *stopURL = STOP_BASE_URL CONFIGURED_STOP_ID "/";
-static const char *stopBMPURL = STOP_BASE_URL CONFIGURED_STOP_ID "/display/gdem075t41wt/display.bmp";
 
 bool isNightTime(void) {
   const int currentMinuteOfDay = (rtc.getHour(true) * 60) + rtc.getMinute();
@@ -130,25 +132,9 @@ void setup() {
 
   initWifi();
 
-  if (isWifiConnected()) {
-    Serial.println("Waiting for NTP time sync");
-    const bool rtcWasValid = getRTCValid();
-    const uint32_t ntpStartMs = millis();
-    updateRTCFromNPT();
-    wakeStats.ntpMs = millis() - ntpStartMs;
-
-    // If this is the first successful sync since power-on, the clock just
-    // jumped from ~1970 to the real time, so a display timestamp recorded
-    // before the sync would look decades stale. Restamp it on the new clock.
-    if (!rtcWasValid && getRTCValid() && lastDisplayUpdateEpoch != 0) {
-      lastDisplayUpdateEpoch = rtc.getEpoch();
-    }
-  } else {
-    Serial.printf("No wifi (%u consecutive failures); skipping NTP sync\n", consecutiveWifiFailures);
-  }
-
-  // If we have a good RTC time and it's night time, sleep until morning. The
-  // last image of the day shows the next morning's busses, so leave it up.
+  // The clock is set from the departures download (updateDisplay()), so on a
+  // wake-up this is the time kept by the RTC through deep sleep.
+  // If we have a good RTC time and it's night time, sleep until morning.
   if (getRTCValid() && isNightTime()) {
     nightTimeSleepHelper();
     // this^ call puts us to sleep for the night, so nothing below is reached
@@ -173,7 +159,7 @@ void lowBatteryHelper(void) {
   if (lastDisplayedMode != DISPLAY_MODE_UNAVAILABLE) {
     Serial.println("Unavailable display not active; displaying unavailable image.");
 
-    showUnavailableImage(stopURL, "Low battery");
+    showUnavailableImage(STOP_PAGE_URL, "Low battery");
     lastDisplayedMode = DISPLAY_MODE_UNAVAILABLE;
   } else {
     Serial.println("Low battery display already active");
@@ -184,6 +170,12 @@ void lowBatteryHelper(void) {
 
 void nightTimeSleepHelper(void) {
   Serial.println("It's night time! Sleeping until the wake-up hour.");
+
+  // Leave the last departures up overnight, but as clock times: a countdown
+  // would sit there being wrong until morning
+  if (lastDisplayedMode == DISPLAY_MODE_LIVE_DATA && haveBoardData()) {
+    drawBoard(true);
+  }
 
   sendTelemetryWithRetries();
 
@@ -207,35 +199,36 @@ void nightTimeSleepHelper(void) {
 }
 
 void updateDisplay(void) {
-  bool displayedImageSuccessfully = false;
-
   if (isWifiConnected()) {
     esp_task_wdt_add(NULL); // Start &
     esp_task_wdt_reset();   // feed watchdog in case things get weird
-    displayedImageSuccessfully = drawBmpFromUrl(stopBMPURL);
+    if (fetchBoardData(BOARD_DATA_URL)) {
+      lastDisplayUpdateEpoch = boardDataEpoch();
+    }
     esp_task_wdt_delete(NULL);
   } else {
-    Serial.println("No wifi; skipping image download");
+    Serial.println("No wifi; skipping download");
   }
 
-  if (displayedImageSuccessfully) {
-    Serial.println("Image displayed successfully");
-    lastDisplayedMode = DISPLAY_MODE_LIVE_DATA;
-    lastDisplayUpdateEpoch = rtc.getEpoch();
+  if (!haveBoardData()) {
+    return; // nothing downloaded since power-on, leave the screen alone
+  }
+
+  const uint32_t dataAge = getTimeSinceLastUpdate();
+  if (dataAge > DISPLAY_STALE_SECONDS) {
+    Serial.printf("Departures are %lu seconds old; showing unavailable image.\n", (unsigned long)dataAge);
+
+    // Only update the display if we haven't already displayed the unavailable image
+    if (lastDisplayedMode != DISPLAY_MODE_UNAVAILABLE) {
+      showUnavailableImage(STOP_PAGE_URL, "Data stale");
+      lastDisplayedMode = DISPLAY_MODE_UNAVAILABLE;
+    }
     return;
   }
 
-  const uint32_t timeSinceLastDisplayUpdate = getTimeSinceLastUpdate();
-  if (lastDisplayUpdateEpoch != 0 && timeSinceLastDisplayUpdate > DISPLAY_STALE_SECONDS) {
-    Serial.printf("Last successful display update was %lu seconds ago; showing unavailable image.\n",
-                  (unsigned long)timeSinceLastDisplayUpdate);
-
-    // Only update the display if we haven't already displayed the unavailable image
-    if(lastDisplayedMode != DISPLAY_MODE_UNAVAILABLE) {
-      showUnavailableImage(stopURL, "Data stale");
-      lastDisplayedMode = DISPLAY_MODE_UNAVAILABLE;
-    }
-  }
+  // Fresh or cached departures: count down from the current time
+  drawBoard(false);
+  lastDisplayedMode = DISPLAY_MODE_LIVE_DATA;
 }
 
 void loop() { }

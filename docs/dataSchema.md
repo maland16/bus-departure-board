@@ -20,10 +20,10 @@ Sent once per wake-up (Influx line protocol, see `src/departure-board/telemetry.
 | `rssi` | Wifi signal strength (dBm) |
 | `display_mode` | What's on the screen, see below |
 | `display_result` | What this wake-up did to the screen, see below |
-| `http_code` | Status of the image download (negative = HTTPClient error, 0 = not attempted) |
-| `time_since_last_update_s` | Seconds since the live image was last successfully downloaded |
+| `http_code` | Status of the departures download (negative = HTTPClient error, 0 = not attempted) |
+| `time_since_last_update_s` | Age of the departures the board has: seconds since the server generated them |
 | `wifi_failures_before_connect` | Wake-ups in a row that failed to connect before this one |
-| `wifi_connect_ms`, `ntp_ms`, `download_ms`, `refresh_ms` | How long each step took this wake-up (0 = skipped) |
+| `wifi_connect_ms`, `download_ms`, `refresh_ms` | How long each step took this wake-up (0 = skipped) |
 | `awake_ms` | Time awake so far this wake-up, when the telemetry was built |
 | `prev_awake_ms` | Total time awake during the previous wake-up, including sending telemetry |
 | `chip_temp_c` | ESP32 internal temperature, reads a few degrees above the enclosure air |
@@ -37,4 +37,6 @@ A second `network` measurement carries the connected `ssid` as a tag.
 
 **`display_mode`**: 0 none, 1 live data, 2 night time (no longer used), 3 unavailable (low battery or stale data)
 
-**`display_result`**: 0 not attempted (no wifi or night time), 1 refreshed, 2 unchanged (refresh skipped), 3 download failed, 4 bad image from server
+**`display_result`**: 0 not attempted (no wifi or night time), 1 refreshed, 2 unchanged (refresh skipped), 3 download failed, 4 bad data from server. After a failed download (3 or 4) the board still redraws from the last departures it has, which shows up in `refresh_ms`.
+
+There's no `ntp_ms` any more: the clock is set from the HTTP `Date` header of each departures download.

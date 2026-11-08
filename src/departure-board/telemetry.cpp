@@ -83,7 +83,7 @@ bool sendTelemetry() {
       "solar_v=%.3f,battery_v=%.3f,rssi=%di,display_mode=%di,reset_reason=%di,"
       "time_since_last_update_s=%lu,heap_free=%ui,heap_min=%ui,"
       "wifi_failures_before_connect=%ui,"
-      "wifi_connect_ms=%lui,ntp_ms=%lui,download_ms=%lui,refresh_ms=%lui,"
+      "wifi_connect_ms=%lui,download_ms=%lui,refresh_ms=%lui,"
       "awake_ms=%lui,prev_awake_ms=%lui,"
       "display_result=%di,http_code=%di,chip_temp_c=%.1f,"
       "wake_count=%lui,crash_count=%lui,brownout_count=%lui,last_crash_reason=%di\n"
@@ -93,7 +93,7 @@ bool sendTelemetry() {
     (unsigned long)staleSeconds,
     (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
     (unsigned)wifiFailuresBeforeConnect,
-    (unsigned long)wakeStats.wifiConnectMs, (unsigned long)wakeStats.ntpMs,
+    (unsigned long)wakeStats.wifiConnectMs,
     (unsigned long)wakeStats.downloadMs, (unsigned long)wakeStats.refreshMs,
     (unsigned long)millis(), (unsigned long)previousWakeAwakeMs,
     (int)wakeStats.displayResult, wakeStats.httpCode, chipTempC,

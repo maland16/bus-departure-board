@@ -1,18 +1,18 @@
-
 #include "display-driver.h"
 
 #include "GxEPD2_display_selection_new_style.h"
 
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include <ESP32Time.h>
 #include <esp_rom_crc.h>
 
-#include <Fonts/FreeMonoBold9pt7b.h>
-#include <Fonts/FreeMonoBold12pt7b.h>
-#include <Fonts/FreeSans18pt7b.h>
-#include <Fonts/FreeSansBold24pt7b.h>
+#include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSans12pt7b.h>
+#include <Fonts/FreeSans18pt7b.h>
+#include <Fonts/FreeSansBold18pt7b.h>
+#include <Fonts/FreeSansBold24pt7b.h>
 
 #include "src/third-party/QRCode/src/rm_qrcode.h"
 
@@ -20,34 +20,47 @@
 #include "rtc-driver.h"
 #include "wake-stats.h"
 
-#define BITMAP_SIGNATURE (0x4D42) // "BM" in hex
-#define MAX_EXPECTED_HEADER_POSITION_BYTES (50)
-#define FETCH_IMAGE_TIMEOUT_MS (20000)
-#define FETCH_IMAGE_TIMEOUT_EXPIRED(X) (millis() - X > FETCH_IMAGE_TIMEOUT_MS)
-#define HTTP_GET_RETRIES (3)
+// The payload schema this firmware understands (see server/busboard/payload.py)
+#define PAYLOAD_VERSION (1)
+// Keep showing a departure this long after its estimated time, like the server does
+#define PAST_GRACE_S (60)
 
 HTTPClient http;
 
-// ---- Fixed target dimensions (native GxEPD2_750_T7 resolution) ----
-static const uint16_t PANEL_WIDTH  = 800;
-static const uint16_t PANEL_HEIGHT = 480;
+// ---- Departures from the last good download, kept across deep sleep so the
+// board can keep counting down on its own clock if a download fails ----
+#define MAX_DEPARTURES (12) // the server sends up to 12
+#define BOARD_ROWS (8)      // ...and the board shows the first 8 still to come
 
-static const size_t FRAMEBUFFER_ROW_BYTES = (PANEL_WIDTH + 7) / 8;                 // 100
-static const size_t FRAMEBUFFER_SIZE      = FRAMEBUFFER_ROW_BYTES * PANEL_HEIGHT;  // 48000
+struct Departure {
+  char route[8];     // e.g. "4", "24A", "BRZ"
+  char headsign[40];
+  uint32_t est;      // estimated departure, epoch s
+  uint32_t sched;    // scheduled departure, epoch s
+  uint8_t src;       // 2 predicted for this stop, 1 estimated from another stop, 0 schedule only
+};
 
-// Worst case row size across supported bit depths (24bpp is the largest per row)
-static const size_t MAX_BMP_ROW_BYTES = ((uint32_t)PANEL_WIDTH * 24 + 31) / 32 * 4; // 2400
+struct BoardData {
+  uint32_t now;      // when the server generated it (epoch s), 0 = no data yet
+  bool live;         // false = GP Metro's realtime feed is down, every time is the schedule
+  char stop[8];
+  char name[40];
+  uint8_t count;
+  Departure deps[MAX_DEPARTURES];
+};
 
-// ---- Static buffers, reused across calls ----
-static uint8_t framebuffer[FRAMEBUFFER_SIZE];
-static uint8_t bmpRowBuf[MAX_BMP_ROW_BYTES];
-static bool blackTable[256]; // palette-index -> "is this black?" lookup for 1/8bpp BMPs
+RTC_DATA_ATTR static BoardData board;
 
-// CRC32 of the image currently on the panel, saved across deep sleep so we can
-// skip refreshing when the downloaded image hasn't changed. Cleared whenever
-// something else is drawn over the live image.
-RTC_DATA_ATTR static uint32_t lastFramebufferCrc = 0;
-RTC_DATA_ATTR static bool lastFramebufferCrcValid = false;
+// CRC32 of the text currently on the panel, saved across deep sleep so we can
+// skip refreshing when nothing changed. Cleared whenever something else is
+// drawn over the departures.
+RTC_DATA_ATTR static uint32_t lastDrawnCrc = 0;
+RTC_DATA_ATTR static bool lastDrawnCrcValid = false;
+
+// ---- Portrait layout, 480 wide x 800 tall (copies server/busboard/render.py) ----
+static const int MARGIN = 16;
+static const int HEADER_H = 96;
+static const int FOOTER_H = 34;
 
 void initDisplayDriver()
 {
@@ -60,39 +73,103 @@ void initDisplayDriver()
     http.setReuse(false);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // in case the file is served via a CDN/redirect
     http.setTimeout(8000);
+    // The board's clock is set from the web host's Date header
+    static const char *headerKeys[] = { "Date" };
+    http.collectHeaders(headerKeys, 1);
     Serial.println("Display initialized");
 }
 
-// ---- Blocking read of exactly `len` bytes from any Stream, with a stall timeout ----
-static bool readFully(Stream &s, uint8_t *dst, size_t len, uint32_t timeoutMs = 8000) {
-  size_t got = 0;
-  uint32_t lastProgress = millis();
-  while (got < len) {
-    int avail = s.available();
-    if (avail > 0) {
-      int n = s.readBytes(dst + got, len - got);
-      if (n > 0) {
-        got += n;
-        lastProgress = millis();
-        continue;
-      }
-    }
-    if (millis() - lastProgress > timeoutMs) return false; // stalled
-    delay(1);
+bool haveBoardData(void) {
+  return board.now != 0;
+}
+
+uint32_t boardDataEpoch(void) {
+  return board.now;
+}
+
+// ---------------------------------------------------------------------------
+// Download
+// ---------------------------------------------------------------------------
+
+static bool downloadBoardData(const char *url) {
+  client.setInsecure();
+
+  if (!http.begin(client, url)) {
+    Serial.println("http.begin() failed - malformed URL?");
+    return false;
   }
+  Serial.printf("GET %s\n", url);
+
+  const int httpCode = http.GET();
+  wakeStats.httpCode = httpCode;
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("HTTP GET failed: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
+    http.end();
+    return false;
+  }
+
+  const bool clockSet = setClockFromHttpDate(http.header("Date").c_str());
+  const String body = http.getString();
+  http.end();
+  Serial.printf("Downloaded %u bytes\n", body.length());
+
+  JsonDocument doc;
+  const DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    Serial.printf("Bad JSON from server: %s\n", err.c_str());
+    wakeStats.displayResult = DISPLAY_RESULT_BAD_DATA;
+    return false;
+  }
+  if ((doc["v"] | 0) != PAYLOAD_VERSION || (doc["now"] | 0u) == 0) {
+    Serial.printf("Unexpected payload (v=%d, now=%lu)\n", doc["v"] | 0, (unsigned long)(doc["now"] | 0u));
+    wakeStats.displayResult = DISPLAY_RESULT_BAD_DATA;
+    return false;
+  }
+
+  BoardData data = {};
+  data.now = doc["now"];
+  data.live = doc["live"] | true;
+  strlcpy(data.stop, doc["stop"] | "", sizeof(data.stop));
+  strlcpy(data.name, doc["name"] | "", sizeof(data.name));
+  for (JsonObject d : doc["deps"].as<JsonArray>()) {
+    if (data.count >= MAX_DEPARTURES) break;
+    Departure &dep = data.deps[data.count++];
+    strlcpy(dep.route, d["r"] | "", sizeof(dep.route));
+    strlcpy(dep.headsign, d["h"] | "", sizeof(dep.headsign));
+    dep.est = d["t"] | 0u;
+    dep.sched = d["s"] | dep.est;
+    dep.src = d["src"] | 0;
+  }
+  board = data;
+
+  // Shouldn't happen (any web host sends Date), but without a clock we'd have
+  // nothing to count down from, so fall back on the server's (slightly old) time
+  if (!clockSet && !getRTCValid()) {
+    rtc.setTime(board.now);
+    rtcValid = true;
+    Serial.println("No Date header; clock set from payload time");
+  }
+
+  Serial.printf("Stop %s \"%s\": %u departures, live=%d, data %ld s old\n",
+                board.stop, board.name, board.count, board.live,
+                (long)rtc.getEpoch() - (long)board.now);
   return true;
 }
 
-// ---- Skip `count` bytes forward in the stream ----
-static bool skipBytes(Stream &s, uint32_t count) {
-  uint8_t buf[32];
-  while (count > 0) {
-    uint32_t chunk = count > sizeof(buf) ? sizeof(buf) : count;
-    if (!readFully(s, buf, chunk)) return false;
-    count -= chunk;
+bool fetchBoardData(const char *url) {
+  wakeStats.displayResult = DISPLAY_RESULT_DOWNLOAD_FAILED;
+  const uint32_t downloadStartMs = millis();
+  const bool ok = downloadBoardData(url);
+  wakeStats.downloadMs = millis() - downloadStartMs;
+  if (ok) {
+    wakeStats.displayResult = DISPLAY_RESULT_NOT_ATTEMPTED; // until drawBoard() runs
   }
-  return true;
+  return ok;
 }
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
 
 static void drawCentered(const char *s, int cx, int baselineY) {
   int16_t x1, y1;
@@ -100,6 +177,224 @@ static void drawCentered(const char *s, int cx, int baselineY) {
   display.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
   display.setCursor(cx - w / 2 - x1, baselineY);
   display.print(s);
+}
+
+static void drawRightAligned(const char *s, int rightX, int baselineY) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor(rightX - w - x1, baselineY);
+  display.print(s);
+}
+
+// Advance width of `s` in the current font
+static int textWidth(const char *s) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+  return x1 + w;
+}
+
+// Shorten `s` in place with "..." until it fits in maxW in the current font
+static void fitText(char *s, size_t size, int maxW) {
+  if (textWidth(s) <= maxW) return;
+  size_t len = strlen(s);
+  char buf[48];
+  while (len > 0) {
+    len--;
+    while (len > 0 && s[len - 1] == ' ') len--; // don't leave "Falmouth ..."
+    snprintf(buf, sizeof(buf), "%.*s...", (int)len, s);
+    if (textWidth(buf) <= maxW) break;
+  }
+  strlcpy(s, buf, size);
+}
+
+// "7:42 pm", in the board's timezone
+static void formatClock(char *out, size_t size, uint32_t epoch) {
+  const time_t t = epoch;
+  struct tm local;
+  localtime_r(&t, &local);
+  const int hour12 = local.tm_hour % 12 == 0 ? 12 : local.tm_hour % 12;
+  snprintf(out, size, "%d:%02d %s", hour12, local.tm_min, local.tm_hour < 12 ? "am" : "pm");
+}
+
+// Everything that ends up on the panel, so it can be CRC'd before drawing
+struct Row {
+  char route[8];
+  char headsign[48];
+  char time[12];
+  char status[40];
+};
+struct Screen {
+  char stop[16];
+  char name[48];
+  uint8_t rows;
+  Row row[BOARD_ROWS];
+  char footer[48];
+};
+
+static void buildScreen(Screen &s, uint32_t now, bool clockTimesOnly) {
+  memset(&s, 0, sizeof(s)); // zero padding too, it's included in the CRC
+  display.setRotation(3);   // portrait upside down on the 800x480 panel, fonts measure in this frame
+
+  snprintf(s.stop, sizeof(s.stop), "STOP %s", board.stop);
+  strlcpy(s.name, board.name, sizeof(s.name));
+  display.setFont(&FreeSansBold18pt7b);
+  fitText(s.name, sizeof(s.name), display.width() - 2 * MARGIN);
+
+  for (uint8_t i = 0; i < board.count && s.rows < BOARD_ROWS; i++) {
+    const Departure &d = board.deps[i];
+    if ((int64_t)d.est + PAST_GRACE_S < now) continue; // already left
+    Row &r = s.row[s.rows++];
+
+    strlcpy(r.route, d.route, sizeof(r.route));
+
+    const int32_t mins = ((int32_t)d.est - (int32_t)now) / 60;
+    const bool showClock = clockTimesOnly || mins >= 60;
+    if (showClock) {
+      formatClock(r.time, sizeof(r.time), d.est);
+    } else if (mins <= 0) {
+      strlcpy(r.time, "Due", sizeof(r.time));
+    } else {
+      snprintf(r.time, sizeof(r.time), "%ld min", (long)mins);
+    }
+
+    if (d.src == 0) {
+      strlcpy(r.status, "scheduled", sizeof(r.status));
+    } else {
+      // The clock time, unless it's already the big time on the right
+      char clock[16] = "";
+      if (!showClock) {
+        formatClock(clock, sizeof(clock), d.est);
+        strlcat(clock, ", ", sizeof(clock));
+      }
+      const int32_t delayS = (int32_t)d.est - (int32_t)d.sched;
+      const int32_t delayMin = (delayS + (delayS >= 0 ? 30 : -30)) / 60; // rounded
+      char rel[20];
+      if (delayMin == 0) {
+        strlcpy(rel, "on time", sizeof(rel));
+      } else {
+        snprintf(rel, sizeof(rel), "%ld min %s", (long)abs(delayMin), delayMin > 0 ? "late" : "early");
+      }
+      snprintf(r.status, sizeof(r.status), "%s%s%s", d.src == 1 ? "~" : "", clock, rel);
+    }
+
+    // Headsign gets the rest of the line after the route badge, the status
+    // whatever's left of the time below it
+    display.setFont(&FreeSansBold18pt7b);
+    const int badgeW = max(56, textWidth(r.route) + 16);
+    const int timeW = textWidth(r.time);
+    const int textW = display.width() - 2 * MARGIN - badgeW - 12;
+    strlcpy(r.headsign, d.headsign, sizeof(r.headsign));
+    display.setFont(&FreeSans18pt7b);
+    fitText(r.headsign, sizeof(r.headsign), textW);
+    display.setFont(&FreeSans12pt7b);
+    fitText(r.status, sizeof(r.status), textW - timeW - 12);
+  }
+
+  strlcpy(s.footer, board.live ? "~ estimated" : "Schedule only - live tracking down",
+          sizeof(s.footer));
+}
+
+static void drawScreen(const Screen &s) {
+  const int panelW = display.width();
+  const int panelH = display.height();
+  const int rowH = (panelH - HEADER_H - FOOTER_H) / BOARD_ROWS;
+
+  display.fillScreen(GxEPD_WHITE);
+  display.setTextColor(GxEPD_BLACK);
+
+  // Header
+  display.setFont(&FreeSans12pt7b);
+  display.setCursor(MARGIN, 32);
+  display.print(s.stop);
+  display.setFont(&FreeSansBold18pt7b);
+  display.setCursor(MARGIN, 74);
+  display.print(s.name);
+  display.fillRect(MARGIN, HEADER_H - 6, panelW - 2 * MARGIN, 3, GxEPD_BLACK);
+
+  for (uint8_t i = 0; i < s.rows; i++) {
+    const Row &r = s.row[i];
+    const int y = HEADER_H + i * rowH;
+
+    // First line: route badge (white on black), then the headsign
+    display.setFont(&FreeSansBold18pt7b);
+    const int badgeW = max(56, textWidth(r.route) + 16);
+    const int textX = MARGIN + badgeW + 12;
+    display.fillRoundRect(MARGIN, y + 6, badgeW, 40, 4, GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+    drawCentered(r.route, MARGIN + badgeW / 2, y + 39);
+    display.setTextColor(GxEPD_BLACK);
+    display.setFont(&FreeSans18pt7b);
+    display.setCursor(textX, y + 39);
+    display.print(r.headsign);
+
+    // Second line: status under the headsign, time right aligned
+    display.setFont(&FreeSansBold18pt7b);
+    drawRightAligned(r.time, panelW - MARGIN, y + rowH - 9);
+    display.setFont(&FreeSans12pt7b);
+    display.setCursor(textX, y + rowH - 11);
+    display.print(r.status);
+
+    if (i < s.rows - 1) {
+      display.drawFastHLine(MARGIN, y + rowH - 2, panelW - 2 * MARGIN, GxEPD_BLACK);
+    }
+  }
+
+  if (s.rows == 0) {
+    display.setFont(&FreeSans18pt7b);
+    drawCentered("No departures in", panelW / 2, panelH / 2 - 10);
+    drawCentered("the next few hours", panelW / 2, panelH / 2 + 34);
+  }
+
+  // Footer
+  const int footerY = panelH - FOOTER_H;
+  display.drawFastHLine(MARGIN, footerY + 2, panelW - 2 * MARGIN, GxEPD_BLACK);
+  display.setFont(&FreeSans9pt7b);
+  display.setCursor(MARGIN, panelH - 10);
+  display.print(s.footer);
+}
+
+void drawBoard(bool clockTimesOnly) {
+  const uint32_t now = rtc.getEpoch();
+  static Screen screen; // static: ~900 bytes, keep it off the stack
+  buildScreen(screen, now, clockTimesOnly);
+
+  Serial.printf("%s, %s\n", screen.stop, screen.name);
+  for (uint8_t i = 0; i < screen.rows; i++) {
+    const Row &r = screen.row[i];
+    Serial.printf("  %-4s %-30s %8s  %s\n", r.route, r.headsign, r.time, r.status);
+  }
+  Serial.printf("  (%s)\n", screen.footer);
+
+  // A download failure this wake-up is the more useful thing to report, the
+  // redraw from cached data still shows up in refresh_ms
+  const bool reportResult = wakeStats.displayResult == DISPLAY_RESULT_NOT_ATTEMPTED;
+
+  // E-ink holds its image without power, so if nothing changed skip the
+  // refresh and save the power (and panel wear)
+  const uint32_t crc = esp_rom_crc32_le(0, (const uint8_t *)&screen, sizeof(screen));
+  if (lastDrawnCrcValid && crc == lastDrawnCrc) {
+    Serial.println("Departures unchanged since last refresh; skipping display update");
+    if (reportResult) wakeStats.displayResult = DISPLAY_RESULT_UNCHANGED;
+    display.hibernate();
+    return;
+  }
+
+  const uint32_t refreshStartMs = millis();
+  display.setFullWindow();
+  display.firstPage();
+  do {
+    drawScreen(screen);
+  } while (display.nextPage());
+  wakeStats.refreshMs = millis() - refreshStartMs;
+  if (reportResult) wakeStats.displayResult = DISPLAY_RESULT_REFRESHED;
+
+  lastDrawnCrc = crc;
+  lastDrawnCrcValid = true;
+
+  display.hibernate();
+  Serial.println("Departures drawn");
 }
 
 void showUnavailableImage(const char *url, const char *reason) {
@@ -144,242 +439,6 @@ void showUnavailableImage(const char *url, const char *reason) {
 
   display.hibernate();
 
-  // The live image is no longer on the panel, so the next one must be drawn
-  lastFramebufferCrcValid = false;
-}
-
-// Download the BMP at `url` and convert it into `framebuffer`. On failure,
-// sets wakeStats.displayResult to BAD_IMAGE if the server sent something we
-// can't use; otherwise the caller's DOWNLOAD_FAILED stands.
-static bool downloadBmpToFramebuffer(const char *url) {
-  client.setInsecure();
-
-  if (display.width() != PANEL_WIDTH || display.height() != PANEL_HEIGHT) {
-    Serial.printf("Display reports %dx%d, expected native %ux%u - check setRotation(0)\n",
-                  display.width(), display.height(), PANEL_WIDTH, PANEL_HEIGHT);
-    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
-    return false;
-  }
-
-  if (!http.begin(client, url)) {
-    Serial.println("http.begin() failed - malformed URL?");
-    return false;
-  } else {
-    Serial.printf("http.begin() succeeded: %s\n", url);
-  }
-
-  Serial.printf("free: %u, largest block: %u\n",
-  heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-  heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-
-  int httpCode = http.GET();
-  wakeStats.httpCode = httpCode;
-  if (httpCode != HTTP_CODE_OK) {
-    Serial.printf("HTTP GET failed: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
-    http.end();
-    return false;
-  } else {
-    Serial.printf("HTTP GET succeeded: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
-  }
-
-  WiFiClient *stream = http.getStreamPtr();
-  if (!stream) {
-    Serial.println("No response stream available");
-    http.end();
-    return false;
-  } else {
-    Serial.println("Response stream available");
-  }
-
-  // ---- BMP file header (14 bytes) ----
-  uint8_t fileHeader[14];
-  if (!readFully(*stream, fileHeader, sizeof(fileHeader))) {
-    Serial.println("Failed to read BMP file header");
-    http.end();
-    return false;
-  }
-  if (fileHeader[0] != 'B' || fileHeader[1] != 'M') {
-    Serial.println("Not a BMP file (missing 'BM' signature)");
-    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
-    http.end();
-    return false;
-  }
-  uint32_t dataOffset = fileHeader[10] | (fileHeader[11] << 8) | (fileHeader[12] << 16) | ((uint32_t)fileHeader[13] << 24);
-
-  // ---- DIB header (assume standard 40-byte BITMAPINFOHEADER) ----
-  uint8_t dib[40];
-  if (!readFully(*stream, dib, sizeof(dib))) {
-    Serial.println("Failed to read DIB header");
-    http.end();
-    return false;
-  }
-  uint32_t dibSize      = dib[0]  | (dib[1]  << 8) | (dib[2]  << 16) | ((uint32_t)dib[3]  << 24);
-  int32_t  bmpWidth     = (int32_t)(dib[4]  | (dib[5]  << 8) | (dib[6]  << 16) | ((uint32_t)dib[7]  << 24));
-  int32_t  bmpHeightRaw = (int32_t)(dib[8]  | (dib[9]  << 8) | (dib[10] << 16) | ((uint32_t)dib[11] << 24));
-  uint16_t bpp          = dib[14] | (dib[15] << 8);
-  uint32_t compression  = dib[16] | (dib[17] << 8) | (dib[18] << 16) | ((uint32_t)dib[19] << 24);
-  uint32_t colorsUsed   = dib[32] | (dib[33] << 8) | (dib[34] << 16) | ((uint32_t)dib[35] << 24);
-
-  bool topDown = bmpHeightRaw < 0;
-  uint32_t bmpHeight = topDown ? (uint32_t)(-bmpHeightRaw) : (uint32_t)bmpHeightRaw;
-
-  Serial.printf("BMP %ldx%lu, %u bpp, compression=%lu, colorsUsed=%lu, topDown=%d\n",
-                (long)bmpWidth, (unsigned long)bmpHeight, bpp,
-                (unsigned long)compression, (unsigned long)colorsUsed, topDown);
-
-  if (compression != 0) {
-    Serial.println("Only uncompressed (BI_RGB) BMPs are supported");
-    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
-    http.end();
-    return false;
-  }
-  if (bpp != 1 && bpp != 8 && bpp != 24) {
-    Serial.printf("Unsupported bit depth: %u (only 1, 8, or 24 bpp supported)\n", bpp);
-    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
-    http.end();
-    return false;
-  }
-  if ((uint32_t)bmpWidth != PANEL_WIDTH || bmpHeight != PANEL_HEIGHT) {
-    Serial.printf("BMP size (%ldx%lu) does not match expected %ux%u - aborting\n",
-                  (long)bmpWidth, (unsigned long)bmpHeight, PANEL_WIDTH, PANEL_HEIGHT);
-    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
-    http.end();
-    return false;
-  }
-
-  // Skip any extra DIB header bytes (e.g. a V4/V5 header instead of the plain 40-byte one)
-  if (dibSize > sizeof(dib)) {
-    if (!skipBytes(*stream, dibSize - sizeof(dib))) { http.end(); return false; }
-  }
-
-  // ---- For 1/8 bpp, read the color palette so we know which index is "black" ----
-  uint32_t paletteBytes = 0;
-  if (bpp <= 8) {
-    uint32_t numColors = colorsUsed != 0 ? colorsUsed : (1u << bpp);
-    if (numColors > 256) numColors = 256;
-    paletteBytes = numColors * 4;
-
-    uint8_t palette[1024]; // 256 entries * 4 bytes max - small, fine on the stack
-    if (!readFully(*stream, palette, paletteBytes)) {
-      Serial.println("Failed to read color palette");
-      http.end();
-      return false;
-    }
-    for (uint32_t i = 0; i < numColors; i++) {
-      uint8_t b = palette[i * 4 + 0];
-      uint8_t g = palette[i * 4 + 1];
-      uint8_t r = palette[i * 4 + 2];
-      uint16_t gray = (r * 299 + g * 587 + b * 114) / 1000;
-      blackTable[i] = (gray <= 128);
-    }
-  }
-
-  // dataOffset is authoritative - skip forward if there's any gap left (rare)
-  uint32_t consumedSoFar = 14 + dibSize + paletteBytes;
-  if (dataOffset > consumedSoFar) {
-    if (!skipBytes(*stream, dataOffset - consumedSoFar)) { http.end(); return false; }
-  }
-
-  // General BMP row-padding formula, works for 1/8/24 bpp alike
-  const size_t rowBytesIn = (((uint32_t)PANEL_WIDTH * bpp + 31) / 32) * 4;
-  if (rowBytesIn > sizeof(bmpRowBuf)) {
-    // Can't happen with PANEL_WIDTH=800 and bpp in {1,8,24}, but guard anyway
-    // since bmpRowBuf is a fixed-size static buffer.
-    Serial.println("BMP row too large for static row buffer");
-    wakeStats.displayResult = DISPLAY_RESULT_BAD_IMAGE;
-    http.end();
-    return false;
-  }
-
-  memset(framebuffer, 0xFF, FRAMEBUFFER_SIZE); // start all-white; we clear bits for black pixels
-
-  const uint8_t threshold = 128; // used only for the 24bpp path; tune if needed
-
-  bool ok = true;
-
-  Serial.print("Downloading BMP");
-  for (uint32_t r = 0; r < PANEL_HEIGHT; r++) {
-    if(r % 10 == 0) { Serial.print("."); }
-
-    if (!readFully(*stream, bmpRowBuf, rowBytesIn)) {
-      Serial.printf("Failed reading BMP row %lu\n", (unsigned long)r);
-      ok = false;
-      break;
-    }
-
-    // BMP rows are bottom-to-top by default; map into the correct output row
-    uint32_t outRow = topDown ? r : (PANEL_HEIGHT - 1 - r);
-    uint8_t *destRow = framebuffer + outRow * FRAMEBUFFER_ROW_BYTES;
-    
-    if(r % 10 == 0) { Serial.print("`"); }
-
-    for (uint16_t x = 0; x < PANEL_WIDTH; x++) {
-      bool isBlack;
-
-      if (bpp == 24) {
-        uint8_t b  = bmpRowBuf[x * 3 + 0];
-        uint8_t g  = bmpRowBuf[x * 3 + 1];
-        uint8_t rr = bmpRowBuf[x * 3 + 2];
-        uint16_t gray = (rr * 299 + g * 587 + b * 114) / 1000;
-        isBlack = (gray <= threshold);
-      } else if (bpp == 8) {
-        uint8_t index = bmpRowBuf[x];
-        isBlack = blackTable[index];
-      } else { // bpp == 1
-        uint8_t byteVal = bmpRowBuf[x / 8];
-        uint8_t index = (byteVal >> (7 - (x % 8))) & 0x1;
-        isBlack = blackTable[index];
-      }
-
-      if (isBlack) {
-        destRow[x / 8] &= ~(0x80 >> (x % 8)); // clear the bit for black
-      }
-      // else: leave bit set (white) - buffer was pre-filled with 0xFF
-    }
-  }
-  Serial.println(" download complete, closing HTTP connection");
-
-  http.end();
-
-  return ok;
-}
-
-bool drawBmpFromUrl(const char *url) {
-  Serial.printf("stack high water mark (beginning of display loop): %u bytes free\n", uxTaskGetStackHighWaterMark(NULL));
-
-  wakeStats.displayResult = DISPLAY_RESULT_DOWNLOAD_FAILED;
-  const uint32_t downloadStartMs = millis();
-  const bool downloaded = downloadBmpToFramebuffer(url);
-  wakeStats.downloadMs = millis() - downloadStartMs;
-
-  if (!downloaded) {
-    return false;
-  }
-
-  // E-ink holds its image without power, so if nothing changed skip the
-  // refresh and save the power (and panel wear)
-  const uint32_t framebufferCrc = esp_rom_crc32_le(0, framebuffer, FRAMEBUFFER_SIZE);
-  if (lastFramebufferCrcValid && framebufferCrc == lastFramebufferCrc) {
-    Serial.println("Image unchanged since last refresh; skipping display update");
-    wakeStats.displayResult = DISPLAY_RESULT_UNCHANGED;
-    display.hibernate();
-    return true;
-  }
-
-  const uint32_t refreshStartMs = millis();
-  display.writeImage(framebuffer, 0, 0, PANEL_WIDTH, PANEL_HEIGHT); // flip to writeImage(..., true) if colors look inverted
-
-  display.refresh();
-  wakeStats.refreshMs = millis() - refreshStartMs;
-  wakeStats.displayResult = DISPLAY_RESULT_REFRESHED;
-
-  lastFramebufferCrc = framebufferCrc;
-  lastFramebufferCrcValid = true;
-
-  Serial.println("Image drawn");
-
-  display.hibernate();
-
-  Serial.printf("stack high water mark (end of display loop): %u bytes free\n", uxTaskGetStackHighWaterMark(NULL));
-  return true;
+  // The departures are no longer on the panel, so the next ones must be drawn
+  lastDrawnCrcValid = false;
 }

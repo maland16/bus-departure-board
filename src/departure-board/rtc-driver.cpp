@@ -1,12 +1,8 @@
-
 #include "rtc-driver.h"
 
-#include <WiFi.h>
+#include <string.h>
 
 #define CLOCK_TIMEZONE ("EST5EDT,M3.2.0,M11.1.0")
-#define NTP_SYNC_TIMEOUT_MS (10000)
-#define NTP_SERVER_PRIMARY "pool.ntp.org"
-#define NTP_SERVER_SECONDARY "time.nist.gov"
 
 ESP32Time rtc(0);
 RTC_DATA_ATTR bool rtcValid = false; // Save in RTC memory so it persists across deep sleep cycles
@@ -17,51 +13,57 @@ bool getRTCValid() {
 
 void initClock()
 {
-  // Only set the timezone here, SNTP is started in updateRTCFromNPT() once
-  // wifi is up (see the comment there)
+  // The clock itself is set from each data download, see setClockFromHttpDate()
   setenv("TZ", CLOCK_TIMEZONE, 1);
   tzset();
 
   Serial.printf("Current time: %04d-%02d-%02d %02d:%02d:%02d\n",
-  rtc.getYear(), rtc.getMonth(), rtc.getDay(),
+  rtc.getYear(), rtc.getMonth() + 1, rtc.getDay(),
   rtc.getHour(true), rtc.getMinute(), rtc.getSecond());
 }
 
-
-void updateRTCFromNPT()
+// Days since 1970-01-01 for a civil date (Howard Hinnant's days_from_civil).
+// newlib has no timegm(), and mktime() would apply the local timezone.
+static int32_t daysFromCivil(int32_t y, uint32_t m, uint32_t d)
 {
-  // Workaround for an arduino-esp32 3.x bug: the first hostByName() after boot
-  // calls dns_clear_cache() without holding the lwIP core lock. If SNTP has a
-  // DNS lookup in flight at that moment, its callback runs from our task and
-  // trips an lwIP assert (udp_new_ip_type "Required to lock TCPIP core"),
-  // panicking the board. Doing our own lookup first gets that one-time cache
-  // clear out of the way while nothing is pending, and warms the DNS cache for
-  // SNTP. So: never start SNTP before this lookup.
-  IPAddress ntpServerIp;
-  WiFi.hostByName(NTP_SERVER_PRIMARY, ntpServerIp);
-  configTzTime(CLOCK_TIMEZONE, NTP_SERVER_PRIMARY, NTP_SERVER_SECONDARY);
+  y -= m <= 2;
+  const int32_t era = (y >= 0 ? y : y - 399) / 400;
+  const uint32_t yoe = (uint32_t)(y - era * 400);
+  const uint32_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  const uint32_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + (int32_t)doe - 719468;
+}
 
-  const unsigned long time = getEpochTimeFromNPT();
-
-  if (time != 0) {
-    rtc.setTime(time);
-    rtcValid = true;
+bool setClockFromHttpDate(const char *date)
+{
+  // e.g. "Sun, 08 Nov 2026 00:32:47 GMT" (RFC 7231 IMF-fixdate)
+  static const char MONTHS[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  int day, year, hour, minute, second;
+  char month[4];
+  if (date == NULL ||
+      sscanf(date, "%*3s, %d %3s %d %d:%d:%d", &day, month, &year, &hour, &minute, &second) != 6) {
+    Serial.printf("Couldn't parse HTTP Date header: \"%s\"\n", date ? date : "");
+    return false;
   }
+  const char *m = strstr(MONTHS, month);
+  if (m == NULL || strlen(month) != 3 || year < 2024) {
+    Serial.printf("Couldn't parse HTTP Date header: \"%s\"\n", date);
+    return false;
+  }
+
+  const uint32_t epoch = (uint32_t)daysFromCivil(year, (m - MONTHS) / 3 + 1, day) * 86400UL
+                         + hour * 3600UL + minute * 60UL + second;
+  const int32_t correction = (int32_t)(epoch - rtc.getEpoch());
+  rtc.setTime(epoch);
+  if (rtcValid) {
+    Serial.printf("Clock set from server, corrected by %ld s\n", (long)correction);
+  } else {
+    Serial.println("Clock set from server");
+  }
+  rtcValid = true;
 
   Serial.printf("Current time: %04d-%02d-%02d %02d:%02d:%02d\n",
-  rtc.getYear(), rtc.getMonth(), rtc.getDay(),
+  rtc.getYear(), rtc.getMonth() + 1, rtc.getDay(),
   rtc.getHour(true), rtc.getMinute(), rtc.getSecond());
+  return true;
 }
-
-unsigned long getEpochTimeFromNPT()
-{
-  time_t now;
-  struct tm timeinfo;
-  // getLocalTime() polls until the time looks valid or the timeout expires
-  if (!getLocalTime(&timeinfo, NTP_SYNC_TIMEOUT_MS)) {
-    return(0);
-  }
-  time(&now);
-  return now;
-}
-

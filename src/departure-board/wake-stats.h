@@ -9,14 +9,13 @@ enum DisplayResult {
   DISPLAY_RESULT_REFRESHED = 1,
   DISPLAY_RESULT_UNCHANGED = 2,
   DISPLAY_RESULT_DOWNLOAD_FAILED = 3,
-  DISPLAY_RESULT_BAD_IMAGE = 4,
+  DISPLAY_RESULT_BAD_DATA = 4, // the server sent something we can't use
 };
 
 // What happened during this wake-up, filled in by the drivers as they go and
 // reported in telemetry. Starts zeroed on every boot.
 struct WakeStats {
   uint32_t wifiConnectMs;
-  uint32_t ntpMs;
   uint32_t downloadMs;
   uint32_t refreshMs;
   int httpCode;
