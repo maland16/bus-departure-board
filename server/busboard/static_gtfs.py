@@ -174,6 +174,17 @@ class StaticIndex:
         day = dt.datetime.strptime(service_date, "%Y%m%d").date()
         return service_day_base(day, self.tz) + trip.origin_departure_secs
 
+    def nearest_origin_sched(self, trip: Trip, ts: int) -> int | None:
+        """When the run of this trip closest to ts is scheduled to start (epoch), None if it doesn't run."""
+        best = None
+        day = dt.datetime.fromtimestamp(ts, self.tz).date()
+        for d in (day - dt.timedelta(days=1), day, day + dt.timedelta(days=1)):
+            if trip.service_id in self.services_by_date.get(d.strftime("%Y%m%d"), ()):
+                start = service_day_base(d, self.tz) + trip.origin_departure_secs
+                if best is None or abs(start - ts) < abs(best - ts):
+                    best = start
+        return best
+
     def stop_sched_secs(self, trip_id: str, stop_sequence: int) -> int | None:
         """Scheduled departure (seconds from the service day base) of any stop on a trip."""
         seqs, secs, _ = self.trip_schedules.get(trip_id, ((), (), ()))

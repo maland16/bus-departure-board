@@ -8,16 +8,29 @@ Either way, every stop earlier in the trip has been left behind. So a watched st
 was departed somewhere between the last report that still placed the bus at or before s and the
 first report placing it after s. The server polls every 30 s; archived snapshots are 2 min apart,
 so departures derived from the archive are coarser.
+
+Reports that can't be the bus serving the trip are ignored. A bus assigned to a trip early reports
+stops on its way to the first one (2026-11-09: seq 3 and 4 fifteen minutes before a trip started,
+then back to seq 1), and a bus can jump from the first stop to near the last within a report
+or two, when it was really somewhere else. Recording those would pass a false "left at" to scoring
+and drift learning, and the real departure would be lost.
 """
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 
 from .realtime import VehicleRT
 from .static_gtfs import StaticIndex
 
 STOPPED_AT = 1
+# Trips really do start a little early, but not more than this (2026-11-07..09: 3-minute-early starts are rare)
+PRE_TRIP_TOLERANCE_S = 180
+# A move past this much scheduled travel time...
+MIN_JUMP_S = 300
+# ...in under this fraction of it isn't driving (running 3x faster than scheduled)
+MAX_SPEEDUP = 1 / 3
 
 
 @dataclass(frozen=True)
@@ -42,6 +55,19 @@ class ObservedDeparture:
     @property
     def uncertainty_s(self) -> int | None:
         return None if self.departed_after is None else (self.departed_by - self.departed_after) // 2
+
+
+def _implausible_move(index, trip_id: str, from_seq: int, to_seq: int, elapsed_s: int) -> bool:
+    """Did a bus cover far more of the route than it could have since its last report?"""
+    # Reporting stop N only proves it has left the stop before N, however long that last leg is
+    seqs = index.trip_schedules.get(trip_id, ((), (), ()))[0]
+    i = bisect.bisect_left(seqs, to_seq)
+    if i == 0:
+        return False
+    a, b = index.stop_sched_secs(trip_id, from_seq), index.stop_sched_secs(trip_id, seqs[i - 1])
+    if a is None or b is None:
+        return False
+    return b - a >= MIN_JUMP_S and elapsed_s < (b - a) * MAX_SPEEDUP
 
 
 @dataclass
@@ -70,9 +96,16 @@ class DepartureObserver:
         out = []
         for trip_id, v in vehicles_by_trip.items():
             visits = watched.get(trip_id)
-            if not visits or not v.stop_id or self._last_ts.get(trip_id) == v.timestamp:
+            prev_ts = self._last_ts.get(trip_id)
+            if not visits or not v.stop_id or prev_ts == v.timestamp:
                 continue  # not a trip we watch, or nothing new from this bus
             self._last_ts[trip_id] = v.timestamp
+            start = index.nearest_origin_sched(index.trips[trip_id], v.timestamp) if trip_id in index.trips else None
+            if start is not None and v.timestamp < start - PRE_TRIP_TOLERANCE_S:
+                for seq, _ in visits:  # on its way to the first stop: every stop is still ahead of it
+                    if (trip_id, seq) not in self._done:
+                        self._before[(trip_id, seq)] = v.timestamp
+                continue
             seqs = index.sequences_of_stop(trip_id, v.stop_id)
             prev = self._position.get(trip_id)
             later = [q for q in seqs if prev is None or q >= prev]
@@ -80,12 +113,15 @@ class DepartureObserver:
                 continue  # reported stop isn't on this trip, or it went backwards (bad data)
             pos = later[0]
             self._position[trip_id] = pos
+            jumped = prev is not None and prev_ts is not None and _implausible_move(index, trip_id, prev, pos,
+                                                                                    v.timestamp - prev_ts)
             for seq, stop_id in visits:
                 key = (trip_id, seq)
                 if key in self._done:
                     continue
                 if seq < pos:
-                    out.append(self._departure(index, trip_id, seq, stop_id, v))
+                    if not jumped:
+                        out.append(self._departure(index, trip_id, seq, stop_id, v))
                     self._done.add(key)
                 else:
                     self._before[key] = v.timestamp

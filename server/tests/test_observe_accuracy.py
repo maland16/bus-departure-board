@@ -45,6 +45,34 @@ def test_first_seen_already_past_has_no_lower_bound(index):
     assert d.departed_after is None and d.uncertainty_s is None
 
 
+def test_reports_before_the_trip_starts_are_not_departures(index):
+    # A bus assigned early reports stops on the way to the first one, then goes back (seen 2026-11-09)
+    obs = DepartureObserver({"0:1117"})
+    for mins, stop in [(40, "0:900"), (41, "0:1117"), (45, "0:1112")]:
+        assert obs.update(index, positions("T_STOP", "V1", local(2026, 11, 6, 17, mins), stop)) == []
+    assert obs.update(index, positions("T_STOP", "V1", local(2026, 11, 6, 18, 6), "0:1117", STOPPED_AT)) == []
+    (d,) = obs.update(index, positions("T_STOP", "V1", local(2026, 11, 6, 18, 7), "0:900"))
+    assert (d.departed_after, d.departed_by) == (local(2026, 11, 6, 18, 6), local(2026, 11, 6, 18, 7))
+
+
+def test_impossible_jump_along_the_route_is_not_a_departure(index):
+    # In 30 s from the first stop to past the watched one, on a leg scheduled for 5+ min
+    obs = DepartureObserver({"0:1117"})
+    t = local(2026, 11, 6, 18, 0)
+    assert obs.update(index, positions("T_STOP", "V1", t, "0:1112", STOPPED_AT)) == []
+    assert obs.update(index, positions("T_STOP", "V1", t + 30, "0:900")) == []
+    assert obs.update(index, positions("T_STOP", "V1", t + 900, "0:900")) == []
+
+
+def test_long_last_leg_is_not_a_jump(index):
+    # Heading to the far stop only means it just left ours
+    obs = DepartureObserver({"0:1117"})
+    t = local(2026, 11, 6, 18, 5)
+    obs.update(index, positions("T_STOP", "V1", t, "0:1117", STOPPED_AT))
+    (d,) = obs.update(index, positions("T_STOP", "V1", t + 30, "0:900"))
+    assert d.stop_sequence == 2
+
+
 def test_forget_resets_for_the_next_days_run(index):
     obs = DepartureObserver({"0:1117"})
     obs.update(index, positions("T_STOP", "V1", local(2026, 11, 6, 18, 10), "0:900"))
