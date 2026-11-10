@@ -1,7 +1,7 @@
 from busboard.departures import SRC_ORIGIN, SRC_SCHEDULE, SRC_STOP, board_departures, compute_departures
 from busboard.realtime import RealtimeSnapshot, parse_trip_updates, parse_vehicle_positions
 
-from conftest import local, trip_updates, vehicle_positions
+from conftest import IN_TRANSIT_TO, STOPPED_AT, local, trip_updates, vehicle_positions
 
 NOW = local(2026, 11, 6, 17, 55)
 
@@ -97,8 +97,47 @@ def test_held_at_timepoint_not_shown_leaving_early(index):
     })
     deps = run(index, snap)
     assert (deps["T_STOP", 2].est, deps["T_STOP", 2].held_at_timepoint) == (local(2026, 11, 6, 18, 5), True)
-    assert (deps["T_SCHED", 2].est, deps["T_SCHED", 2].held_at_timepoint) == (local(2026, 11, 6, 18, 58), False)
     assert deps["T_ENDS", 2].est == local(2026, 11, 6, 20, 5)
+
+
+def test_early_is_believed_only_once_the_trip_has_started(index):
+    # A not-yet-started trip can't be early, timepoint or not (a bus on its way to the first stop)
+    deps = run(index, snapshot({"T_SCHED": {2: local(2026, 11, 6, 18, 58)}}))
+    assert (deps["T_SCHED", 2].est, deps["T_SCHED", 2].held_at_timepoint) == (local(2026, 11, 6, 19, 2), False)
+    # Once it's running, a non-timepoint stop can really be early
+    now = local(2026, 11, 6, 19, 0, 30)
+    deps = run(index, snapshot({"T_SCHED": {2: local(2026, 11, 6, 19, 1)}}), now=now)
+    assert deps["T_SCHED", 2].est == local(2026, 11, 6, 19, 1)
+
+
+def test_wait_at_a_timepoint_ahead_delays_later_stops(index):
+    # Bus between stops 2 and 3 of the loop, 3 min ahead of schedule: it waits at the timepoint (seq 3)
+    now = local(2026, 11, 6, 19, 32)
+    times = {3: local(2026, 11, 6, 19, 37), 4: local(2026, 11, 6, 19, 47)}
+    snap = snapshot({"T_LOOP": times}, positions={"T_LOOP": ("2645", now - 10, "0:900", IN_TRANSIT_TO)})
+    d = run(index, snap, now=now)["T_LOOP", 4]
+    assert (d.timepoint_wait_s, d.est) == (180, local(2026, 11, 6, 19, 50))
+    # Past that timepoint already: no wait left to add
+    snap = snapshot({"T_LOOP": times}, positions={"T_LOOP": ("2645", now - 10, "0:1117", IN_TRANSIT_TO)})
+    assert run(index, snap, now=now)["T_LOOP", 4].timepoint_wait_s == 0
+
+
+def test_wait_at_the_first_stop_before_the_trip_starts(index):
+    # Sitting at its first stop 5 min early: the feed assumes it leaves right away
+    snap = snapshot({"T_SCHED": {1: local(2026, 11, 6, 18, 55), 2: local(2026, 11, 6, 18, 57)}},
+                    positions={"T_SCHED": ("2645", NOW - 10, "0:1112", STOPPED_AT)})
+    d = run(index, snap)["T_SCHED", 2]
+    assert (d.timepoint_wait_s, d.est) == (300, local(2026, 11, 6, 19, 2))
+
+
+def test_runaway_lateness_is_capped_until_a_bus_is_assigned(index):
+    now = local(2026, 11, 6, 18, 0)
+    # Seen 2026-11-09: 105 min late in the feed, 4 min late in fact
+    est = local(2026, 11, 6, 20, 17)
+    assert run(index, snapshot({"T_ORIGIN": {2: est}}), now=now)["T_ORIGIN", 2].est == local(2026, 11, 6, 18, 42)
+    # With a bus assigned the same prediction is believed
+    snap = snapshot({"T_ORIGIN": {2: est}}, positions={"T_ORIGIN": ("2645", now - 10, "0:1112", STOPPED_AT)})
+    assert run(index, snap, now=now)["T_ORIGIN", 2].est == est
 
 
 def test_stop_sched_secs(index):

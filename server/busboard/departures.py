@@ -20,6 +20,15 @@ Then:
 - At timepoints the estimate is never earlier than the schedule (held_at_timepoint): buses
   wait there. Seen at Metro Pulse, where the feed predicted waiting buses leaving up to 19 min
   early and every one left on schedule. Not applied where the trip ends (an arrival).
+- Waits at timepoints the bus hasn't reached yet also delay every stop after them (timepoint_wait_s).
+  The feed doesn't model them: 2026-11-09 it had a route 8 bus 12 min early for a whole trip because it
+  was sitting at its first stop before its start time; it then waited out those minutes at timepoints.
+- A trip that hasn't started can't be early anywhere. Buses are assigned to trips before they start
+  and report stops on the way to the first one, and the feed extrapolates from those (seen: 22 min
+  early), when in fact they start on time.
+- A trip with no bus yet has its lateness capped (MAX_UNASSIGNED_DELAY_S): it's inherited from the
+  bus's previous trips, and the feed lets it run away when that bus stops somewhere for a while
+  while still reporting (2026-11-09: route 1 predicted 105 min late, then left 4 min late).
 """
 
 from __future__ import annotations
@@ -35,6 +44,9 @@ SRC_SCHEDULE, SRC_ORIGIN, SRC_STOP = 0, 1, 2
 MAX_LATENESS_S = 3 * 3600
 # Realtime times further than this from the schedule are assumed to belong to another day's run
 MAX_RT_OFFSET_S = 6 * 3600
+# A trip with no bus assigned yet: lateness inherited through the block is unreliable beyond this.
+# Measured 2026-11-07..09, 2-40 min ahead: predicted +10-20 min -> actually +7; predicted 20+ -> +4.
+MAX_UNASSIGNED_DELAY_S = 600
 
 
 @dataclass
@@ -68,6 +80,7 @@ class Departure:
     block_delay_s: int | None = None  # lateness carried over from the previous trip on the block
     from_vehicle: bool = False  # estimated from the bus's reported position (no TripUpdate)
     drift_s: int = 0  # correction applied by drift.DriftModel (learned from observed departures)
+    timepoint_wait_s: int = 0  # added because the bus will wait at timepoints before this stop
 
     @property
     def delay_s(self) -> int:
@@ -108,8 +121,11 @@ def compute_departures(
         trt = realtime.trips.get(trip.trip_id)
         est, src = sv.sched, SRC_SCHEDULE
         origin_delay = ref_seq = None
+        wait = 0
+        base = sv.sched - sv.visit.departure_secs  # the service day's base, as epoch
+        started = now >= base + trip.origin_departure_secs
+        vehicle = realtime.vehicles_by_trip.get(trip.trip_id)
         if trt:
-            base = sv.sched - sv.visit.departure_secs  # the service day's base, as epoch
             o = trt.stop_times.get(trip.origin_stop_sequence)
             origin_sched = index.origin_sched(trip, sv.service_date)
             if o and abs(o - origin_sched) < MAX_RT_OFFSET_S:
@@ -122,6 +138,15 @@ def compute_departures(
                 if ref is not None:
                     ref_seq, delay = ref
                     est, src = sv.sched + delay, SRC_ORIGIN
+            if src != SRC_SCHEDULE:
+                wait = _timepoint_wait(index, trip.trip_id, trt.stop_times, sv.visit.stop_sequence, base, now, vehicle,
+                                       started)
+                est += wait
+                if not started:
+                    if not sv.ends_here and not sv.visit.timepoint:  # timepoints are held below
+                        est = max(est, sv.sched)
+                    if vehicle is None and not trt.vehicle_id:
+                        est = min(est, sv.sched + MAX_UNASSIGNED_DELAY_S)
 
         block_delay = None
         if block_layover_s is not None and src != SRC_STOP:
@@ -129,7 +154,6 @@ def compute_departures(
             if block_delay is not None and sv.sched + block_delay > est:
                 est, src = sv.sched + block_delay, SRC_ORIGIN
 
-        vehicle = realtime.vehicles_by_trip.get(trip.trip_id)
         vehicle_age = int(now - vehicle.timestamp) if vehicle else None
         stale = vehicle_age is not None and vehicle_age > stale_vehicle_s
         if stale and src != SRC_SCHEDULE:
@@ -178,6 +202,7 @@ def compute_departures(
                 held_at_timepoint=held,
                 block_delay_s=block_delay,
                 from_vehicle=from_vehicle,
+                timepoint_wait_s=wait if src != SRC_SCHEDULE else 0,
             )
         )
     out.sort(key=lambda d: (d.est, d.route))
@@ -196,6 +221,33 @@ def _nearest_delay(index: StaticIndex, trip_id: str, stop_times: dict[int, int],
             if abs(delay) < MAX_RT_OFFSET_S:
                 return ref, delay
     return None
+
+
+def _timepoint_wait(index: StaticIndex, trip_id: str, stop_times: dict[int, int], seq: int, base: int, now: int,
+                    vehicle, started: bool) -> int:
+    """Seconds to add to a feed estimate for stop `seq`, for time the bus will spend waiting at timepoints
+    ahead of it before that stop, by walking the feed's times up to it. Only for stops the bus hasn't
+    reached: the feed keeps the times of stops already passed, and those were real departures."""
+    timepoints = index.timepoints.get(trip_id, ())
+    bus_at = None
+    if started and vehicle is not None and vehicle.stop_id:
+        at = [q for q in index.sequences_of_stop(trip_id, vehicle.stop_id) if q <= seq]
+        bus_at = max(at) if at else None
+    wait = 0
+    for q in sorted(stop_times):
+        if q >= seq:
+            break
+        if q not in timepoints:
+            continue
+        if bus_at is not None:
+            if q < bus_at:
+                continue
+        elif started and stop_times[q] < now:
+            continue  # no position to go by: the feed's time says it's been and gone
+        secs = index.stop_sched_secs(trip_id, q)
+        if secs is not None:
+            wait = max(wait, base + secs - stop_times[q])
+    return wait
 
 
 def _vehicle_position_delay(index: StaticIndex, trip_id: str, vehicle, sv):

@@ -114,6 +114,7 @@ class StaticIndex:
         missing_stop_codes: list[str] | None = None,
         trip_schedules: dict[str, tuple[array, array, array]] | None = None,
         stop_id_list: list[str] | None = None,
+        timepoints: dict[str, frozenset[int]] | None = None,
     ):
         self.tz = tz
         self.stop_ids_by_code = stop_ids_by_code
@@ -128,6 +129,7 @@ class StaticIndex:
         # sequence; arrays keep this compact on the Pi
         self.trip_schedules = trip_schedules or {}
         self.stop_id_list = stop_id_list or []
+        self.timepoints = timepoints or {}  # trip_id -> stop_sequences where buses wait for the schedule
         self._stop_index = {sid: i for i, sid in enumerate(self.stop_id_list)}
         # block_id -> trips on it, in order of their first departure (all service days mixed)
         self.trips_by_block: dict[str, list[Trip]] = {}
@@ -261,12 +263,16 @@ def build_index(zip_bytes: bytes, stop_codes: list[str], version: str = "") -> S
     first: dict[str, tuple[int, int]] = {}  # trip -> (seq, departure_secs)
     last: dict[str, tuple[int, str]] = {}  # trip -> (seq, stop_id)
     stop_secs: dict[str, list[tuple[int, int, int]]] = {}  # trip -> [(seq, departure_secs, stop index)]
+    timepoints: dict[str, set[int]] = {}
     for r in _rows(zf, "stop_times.txt"):
         trip_id, stop_id = r["trip_id"], r["stop_id"]
         seq = int(r["stop_sequence"])
         dep = r.get("departure_time") or r.get("arrival_time") or ""
+        is_timepoint = (r.get("timepoint") or "1") != "0"
+        if is_timepoint:
+            timepoints.setdefault(trip_id, set()).add(seq)
         if stop_id in wanted and dep:
-            visits[stop_id].append(StopVisit(trip_id, seq, parse_gtfs_time(dep), (r.get("timepoint") or "1") != "0"))
+            visits[stop_id].append(StopVisit(trip_id, seq, parse_gtfs_time(dep), is_timepoint))
         if dep:
             stop_secs.setdefault(trip_id, []).append(
                 (seq, parse_gtfs_time(dep), stop_index.setdefault(stop_id, len(stop_index))))
@@ -341,6 +347,7 @@ def build_index(zip_bytes: bytes, stop_codes: list[str], version: str = "") -> S
         missing_stop_codes=missing,
         trip_schedules=trip_schedules,
         stop_id_list=list(stop_index),
+        timepoints={t: frozenset(q) for t, q in timepoints.items() if t in trips},
     )
 
 
