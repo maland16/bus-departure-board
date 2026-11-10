@@ -30,13 +30,16 @@ For each scheduled visit to the stop, the first rule that applies:
 - If a trip has no usable TripUpdate but its bus is reporting its position, the delay is taken from where the bus is
   (its report time minus its scheduled time at the stop it's at or heading to). If the bus is already past this
   stop, the departure is dropped.
-- **Drift correction** (`drift_correction`, on): GP Metro's predictions are right just before a bus leaves but drift
-  with lead time, by route and place along it: on 2026-11-07 buses at Congress St + Park/State left ~3 min later
-  than predicted 20+ min ahead, while other routes left early. For each route, direction and stop, the server
-  fits how far actual departures (from vehicle positions) drifted per minute of lead over the last 3 hours, and
-  shifts predictions by that, scaled down until a few departures have been seen and capped at 5 minutes. It never
-  moves a departure before its scheduled time at a timepoint. Learned state is rebuilt from `compare.db` on restart;
-  `/health` shows the largest corrections.
+- Estimates allow for buses waiting at timepoints the bus hasn't reached yet, which the feed doesn't model (it can show
+  a bus as 12 min early for a whole trip). A trip that hasn't started is never shown early, and a trip with no bus
+  assigned yet has its lateness capped at 10 minutes, since that lateness is inherited through the block and can run away.
+- **Drift correction** (`drift_correction`, on): buses leave a steady ~1 min later than GP Metro predicts, by an amount
+  that varies by route and place but not with how far ahead the prediction was made. For each route, direction and
+  stop, the server learns that offset from actual departures (from vehicle positions) over the last 3 hours, and
+  shifts predictions by it, scaled down until a few departures have been seen, capped at 5 minutes and faded out in the
+  last 3 minutes before a departure, where the feed is already good. Feed glitches (errors over 10 min) and vaguely
+  known departures aren't learned from. It never moves a departure before its scheduled time at a timepoint. Learned
+  state is rebuilt from `compare.db` on restart; `/health` shows the largest corrections.
 - Optional, off by default (`block_propagation`): a trip can't start before its bus finishes the previous trip on the
   same block. Re-measure with `busboard.accuracy` before turning it on.
 - Departures more than 60 s in the past are dropped.

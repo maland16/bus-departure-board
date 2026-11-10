@@ -347,6 +347,7 @@ class CompareStore:
                      ON o.service_date = r.service_date AND o.trip_id = r.trip_id AND o.stop_code = r.stop_code
                     AND o.stop_sequence = r.stop_sequence
                    WHERE r.ts >= ? AND r.our_src IN (1, 2) AND o.departed_after IS NOT NULL
+                     AND o.departed_by - o.departed_after <= 180
                      AND r.category NOT IN ('ucop_departed', 'ours_terminating')""", (since,))]
 
     def observed_count(self, stop_code: str, since: int) -> int:

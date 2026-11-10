@@ -425,8 +425,8 @@ def _summary_table(s: dict) -> str:
 
 def _drift_status(now: float) -> dict:
     st = drift.status(static.index, int(now))
-    biggest = sorted(st.items(), key=lambda kv: -abs(kv[1]["shift_at_20min_s"]))[:8]
-    return {"keys": len(st), "largest_shift_at_20min": {k: v["shift_at_20min_s"] for k, v in biggest}}
+    biggest = sorted(st.items(), key=lambda kv: -abs(kv[1]["offset_s"]))[:8]
+    return {"keys": len(st), "largest_offset_s": {k: v["offset_s"] for k, v in biggest}}
 
 
 def _publish_line() -> str:
