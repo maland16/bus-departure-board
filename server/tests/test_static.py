@@ -1,6 +1,48 @@
-from busboard.static_gtfs import tidy_headsign
+import httpx
+import pytest
 
-from conftest import local
+from busboard.static_gtfs import StaticFeed, tidy_headsign
+
+from conftest import local, make_zip
+
+
+@pytest.fixture
+def feed_with_bad_cache(tmp_path):
+    feed = StaticFeed("http://feed.test/gtfs.zip", tmp_path, ["1117"])
+    feed.zip_path.parent.mkdir(parents=True)
+    feed.zip_path.write_bytes(b"not a zip")
+    feed.meta_path.write_text('{"etag": "old"}')
+    return feed
+
+
+def test_corrupt_cached_zip_is_replaced_by_a_full_download(feed_with_bad_cache, monkeypatch):
+    feed = feed_with_bad_cache
+    sent = {}
+
+    def fake_get(url, headers, **_kwargs):
+        sent.update(headers)
+        return httpx.Response(200, content=make_zip(), headers={"etag": "new"}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("busboard.static_gtfs.httpx.get", fake_get)
+    assert feed.load_cached() is False
+    assert feed.index is None
+    assert feed.refresh() is True
+    assert "If-None-Match" not in sent  # the server would answer 304 and leave the bad zip in place
+    assert feed.index is not None
+    assert feed.load_cached() is True
+
+
+def test_corrupt_cached_zip_with_no_network_does_not_raise(feed_with_bad_cache, monkeypatch):
+    feed = feed_with_bad_cache
+
+    def fake_get(*_args, **_kwargs):
+        raise httpx.ConnectError("no network")
+
+    monkeypatch.setattr("busboard.static_gtfs.httpx.get", fake_get)
+    assert feed.load_cached() is False
+    assert feed.refresh() is False
+    assert feed.index is None
+    assert "ConnectError" in feed.last_error
 
 
 def test_tidy_headsign():

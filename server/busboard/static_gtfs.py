@@ -356,14 +356,19 @@ class StaticFeed:
         if not self.zip_path.exists():
             return False
         meta = self._meta()
-        self.index = build_index(self.zip_path.read_bytes(), self.stop_codes, meta.get("etag", ""))
-        self.fetched_at = meta.get("fetched_at", self.zip_path.stat().st_mtime)
+        try:
+            self.index = build_index(self.zip_path.read_bytes(), self.stop_codes, meta.get("etag", ""))
+            self.fetched_at = meta.get("fetched_at", self.zip_path.stat().st_mtime)
+        except Exception:  # e.g. damaged by a power cut; refresh() downloads a new copy
+            log.exception("cached static feed %s is unreadable", self.zip_path)
+            return False
         return True
 
     def refresh(self, force: bool = False) -> bool:
         """Download the zip if it changed. Returns True if a new index was built."""
         self.last_check = time.time()
-        meta = self._meta() if self.zip_path.exists() and not force else {}
+        # Only ask "has it changed?" with a working index: a 304 can't repair a missing or damaged cached zip
+        meta = self._meta() if self.index is not None and self.zip_path.exists() and not force else {}
         headers = {"User-Agent": USER_AGENT}
         if meta.get("etag"):
             headers["If-None-Match"] = meta["etag"]
@@ -373,8 +378,6 @@ class StaticFeed:
             resp = httpx.get(self.url, headers=headers, timeout=60, follow_redirects=True)
             if resp.status_code == 304:
                 self.last_error = None
-                if self.index is None:
-                    return self.load_cached()
                 return False
             resp.raise_for_status()
             index = build_index(resp.content, self.stop_codes, resp.headers.get("etag", ""))
