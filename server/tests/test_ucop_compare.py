@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from busboard.compare import MATCH, OURS_ONLY, TIME_DIFF, UCOP_DEPARTED, UCOP_ONLY, CompareStore, compare
+from busboard.compare import (MATCH, OURS_ONLY, TIME_DIFF, UCOP_DEPARTED, UCOP_NO_TIME, UCOP_ONLY, CompareStore,
+                              compare)
 from busboard.departures import Departure
 from busboard.ucop import UcopArrival, clock_to_epoch, parse_stop_page
 
@@ -72,6 +73,18 @@ def test_compare_categories():
     assert rows["E"].category == TIME_DIFF and rows["E"].stale_vehicle
     assert rows["H"].category == UCOP_DEPARTED
     assert "F" not in rows and "G" not in rows
+
+
+def test_ucop_listing_without_a_time():
+    # Seen 2026-11-12: UCOP showed a trip as "Canceled" with only its (struck-out) scheduled time
+    now = local(2026, 11, 6, 18, 0)
+    sched = local(2026, 11, 6, 18, 5)
+    ucop = [UcopArrival("20261106", "K", "0:1117", "4", "Metro Pulse", sched, None, "warn", "Canceled", ""),
+            UcopArrival("20261106", "L", "0:1117", "4", "Metro Pulse", sched, None, "warn", "Canceled", "")]
+    rows = {r.trip_id: r for r in compare([dep("K", sched)], ucop, now, tolerance_s=90, past_grace_s=60,
+                                          window_ahead_s=3 * 3600)}
+    assert rows["K"].category == UCOP_NO_TIME and rows["K"].diff_s is None
+    assert "L" not in rows  # UCOP-only and no time: nothing to compare
 
 
 def test_store_roundtrip(tmp_path):

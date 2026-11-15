@@ -130,6 +130,22 @@ def test_wait_at_the_first_stop_before_the_trip_starts(index):
     assert (d.timepoint_wait_s, d.est) == (300, local(2026, 11, 6, 19, 2))
 
 
+def test_parked_at_first_stop_with_rest_of_trip_on_schedule(index):
+    # Seen 2026-11-10 on route 5: the first stop's time is "now" (18 min early) but the feed already
+    # has the bus leaving on time, so there's no wait to add
+    parked = {"T_SCHED": ("2645", NOW - 10, "0:1112", STOPPED_AT)}
+    snap = snapshot({"T_SCHED": {1: local(2026, 11, 6, 18, 42), 2: local(2026, 11, 6, 19, 2)}}, positions=parked)
+    d = run(index, snap)["T_SCHED", 2]
+    assert (d.timepoint_wait_s, d.est) == (0, local(2026, 11, 6, 19, 2))
+    # Partly carried over: only the earliness that reaches this stop counts
+    snap = snapshot({"T_SCHED": {1: local(2026, 11, 6, 18, 42), 2: local(2026, 11, 6, 18, 59)}}, positions=parked)
+    assert run(index, snap)["T_SCHED", 2].timepoint_wait_s == 180
+    # Parked a stop further on (seen at 372): the stops behind it are "now", this one is on schedule
+    snap = snapshot({"T_LOOP": {1: local(2026, 11, 6, 19, 5), 2: local(2026, 11, 6, 19, 6),
+                                4: local(2026, 11, 6, 19, 50)}})
+    assert run(index, snap)["T_LOOP", 4].timepoint_wait_s == 0
+
+
 def test_runaway_lateness_is_capped_until_a_bus_is_assigned(index):
     now = local(2026, 11, 6, 18, 0)
     # Seen 2026-11-09: 105 min late in the feed, 4 min late in fact

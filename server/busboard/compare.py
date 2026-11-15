@@ -24,7 +24,10 @@ OURS_TERMINATING = "ours_terminating"
 # UCOP's page couldn't be fetched (or the stop has none): our departures are still logged, so
 # they can be scored against observed departures. Not counted in the comparison.
 NO_UCOP = "no_ucop"
-NOT_COUNTED = (UCOP_DEPARTED, OURS_TERMINATING, NO_UCOP)
+# UCOP lists the trip without a time (seen 2026-11-12: "Canceled", for a trip that ran). Our side is
+# still logged for scoring; not counted in the comparison.
+UCOP_NO_TIME = "ucop_no_time"
+NOT_COUNTED = (UCOP_DEPARTED, OURS_TERMINATING, NO_UCOP, UCOP_NO_TIME)
 
 # Why a time_diff happened. The first four are disagreements where the evidence says UCOP is
 # showing something stale or impossible; whatever is left (by our source) is worth investigating.
@@ -144,6 +147,8 @@ def compare(
         if d and a:
             if a.departed:
                 row.category = UCOP_DEPARTED
+            elif a.est is None:
+                row.category = UCOP_NO_TIME
             else:
                 row.category = MATCH if abs(row.diff_s) <= tolerance_s else TIME_DIFF
                 row.raw_matches_ucop = abs(row.diff_s - row.drift_s) <= tolerance_s
@@ -372,7 +377,7 @@ class CompareStore:
           SUM(headsign_differs) AS headsign_differs,
           COUNT(DISTINCT trip_id) AS trips,
           (SELECT COUNT(*) FROM snapshots WHERE stop_code=:stop AND ts>=:since) AS snapshots
-        FROM rows WHERE stop_code=:stop AND ts>=:since AND category NOT IN ('ucop_departed', 'ours_terminating', 'no_ucop') {extra}
+        FROM rows WHERE stop_code=:stop AND ts>=:since AND category NOT IN ('ucop_departed', 'ours_terminating', 'no_ucop', 'ucop_no_time') {extra}
         """
         reasons = ",\n".join(
             f"SUM(category='time_diff' AND {DIFF_REASON_SQL}='{r}') AS diff_{r}" for r in DIFF_REASONS)

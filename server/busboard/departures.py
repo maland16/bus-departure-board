@@ -23,6 +23,9 @@ Then:
 - Waits at timepoints the bus hasn't reached yet also delay every stop after them (timepoint_wait_s).
   The feed doesn't model them: 2026-11-09 it had a route 8 bus 12 min early for a whole trip because it
   was sitting at its first stop before its start time; it then waited out those minutes at timepoints.
+  Only earliness the feed carries all the way to the stop counts: 2026-11-10 route 5 buses parked before
+  their start had the stops behind them at "now" but the rest of the trip on schedule (the feed already
+  holds them).
 - A trip that hasn't started can't be early anywhere. Buses are assigned to trips before they start
   and report stops on the way to the first one, and the feed extrapolates from those (seen: 22 min
   early), when in fact they start on time.
@@ -227,14 +230,21 @@ def _timepoint_wait(index: StaticIndex, trip_id: str, stop_times: dict[int, int]
                     vehicle, started: bool) -> int:
     """Seconds to add to a feed estimate for stop `seq`, for time the bus will spend waiting at timepoints
     ahead of it before that stop, by walking the feed's times up to it. Only for stops the bus hasn't
-    reached: the feed keeps the times of stops already passed, and those were real departures."""
+    reached: the feed keeps the times of stops already passed, and those were real departures.
+
+    A timepoint's earliness only counts as far as the feed carries it, up to and including this stop:
+    when the feed has the bus early at the timepoint but on schedule somewhere after it, the feed already
+    holds it. Seen 2026-11-10 on route 5: buses parked before their start (at the first stop, or a couple
+    of stops in) had the stops behind them at "now" and the rest of the trip on schedule; adding that
+    earliness put them 13-18 min late everywhere."""
     timepoints = index.timepoints.get(trip_id, ())
     bus_at = None
     if started and vehicle is not None and vehicle.stop_id:
         at = [q for q in index.sequences_of_stop(trip_id, vehicle.stop_id) if q <= seq]
         bus_at = max(at) if at else None
+    seqs = sorted(stop_times)
     wait = 0
-    for q in sorted(stop_times):
+    for i, q in enumerate(seqs):
         if q >= seq:
             break
         if q not in timepoints:
@@ -245,8 +255,16 @@ def _timepoint_wait(index: StaticIndex, trip_id: str, stop_times: dict[int, int]
         elif started and stop_times[q] < now:
             continue  # no position to go by: the feed's time says it's been and gone
         secs = index.stop_sched_secs(trip_id, q)
-        if secs is not None:
-            wait = max(wait, base + secs - stop_times[q])
+        if secs is None:
+            continue
+        early = base + secs - stop_times[q]
+        for n in seqs[i + 1:]:
+            if n > seq:
+                break
+            n_secs = index.stop_sched_secs(trip_id, n)
+            if n_secs is not None:
+                early = min(early, base + n_secs - stop_times[n])
+        wait = max(wait, early)
     return wait
 
 

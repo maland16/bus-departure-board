@@ -47,6 +47,9 @@ _ucop_client: UcopClient | None = None
 _static_name: str | None = None  # archived file name of the static version behind the current index
 _last_rt_error: str | None = None
 _match_dip_logged = False
+# Trips in the previous static version that the current one dropped (e.g. a holiday's service the
+# morning after). Their buses can linger in the realtime feed as ghosts; that's not a trip_id change.
+_retired_trips: frozenset[str] = frozenset()
 _ucop_error_by_stop: dict[str, str | None] = {}
 observer: DepartureObserver | None = None
 UCOP_BMP_MAX_AGE_S = 60
@@ -111,7 +114,7 @@ def trip_match_rate() -> tuple[int, int]:
     e.g. trip_ids changed in a new nightly build we haven't downloaded yet."""
     if static.index is None:
         return 0, 0
-    trips = realtime.snapshot.trips
+    trips = [t for t in realtime.snapshot.trips if t not in _retired_trips]
     return sum(1 for t in trips if t in static.index.trips), len(trips)
 
 
@@ -128,7 +131,7 @@ async def _every(interval_s: float, fn, name: str):
 
 def _on_static_index(previous: StaticIndex | None, reason: str):
     """Archive the static version behind the current index and log what changed."""
-    global _static_name
+    global _static_name, _retired_trips
     idx = static.index
     if idx is None:
         return
@@ -143,6 +146,7 @@ def _on_static_index(previous: StaticIndex | None, reason: str):
     }
     if previous is not None and previous is not idx:
         old, new = set(previous.trips), set(idx.trips)
+        _retired_trips = frozenset(old - new)
         # Whether trip_ids survive the nightly rebuild (an open question about this feed)
         fields.update(previous_version=previous.version, trips_kept=len(old & new),
                       trips_added=len(new - old), trips_removed=len(old - new))
@@ -166,7 +170,8 @@ def _realtime_tick():
     matched, total = trip_match_rate()
     dipped = total >= 20 and matched / total < 0.9
     if dipped and not _match_dip_logged:
-        unmatched = [t for t in realtime.snapshot.trips if static.index and t not in static.index.trips]
+        unmatched = [t for t in realtime.snapshot.trips
+                     if static.index and t not in static.index.trips and t not in _retired_trips]
         events.write("trip_match_dip", matched=matched, total=total, static_version=static.index.version,
                      unmatched_sample=unmatched[:20])
     _match_dip_logged = dipped
@@ -229,12 +234,16 @@ def _compare_tick():
         ucop_latest[code] = snap
         t = int(snap.fetched_at)
         no_page = bool(snap.error) and not snap.arrivals
-        # Without UCOP's page, still log our departures so they can be scored against actual ones
-        ours, rows = compare_stop(idx, rt_used, None if no_page else snap.arrivals, code, t, cfg, drift)
         if _ucop_error_by_stop.get(code) != snap.error:  # log changes, not every failed fetch
             events.write("ucop_error" if snap.error else "ucop_recovered", stop=code, error=snap.error)
             _ucop_error_by_stop[code] = snap.error
-        store.record(code, t, rows, len(snap.arrivals), len(ours), snap.error, archive_rel)
+        try:
+            # Without UCOP's page, still log our departures so they can be scored against actual ones
+            ours, rows = compare_stop(idx, rt_used, None if no_page else snap.arrivals, code, t, cfg, drift)
+            store.record(code, t, rows, len(snap.arrivals), len(ours), snap.error, archive_rel)
+        except Exception:
+            # One stop's odd page mustn't cost every other stop its comparison (2026-11-12)
+            log.exception("compare failed for stop %s", code)
     store.prune(cfg.retention_days)
     archive.prune(cfg.archive_days)
     events.prune(max(cfg.retention_days, cfg.archive_days))
