@@ -3,9 +3,8 @@
 
 # Stop codes as shown on the bus stop sign (GTFS stop_code, e.g. 1117 -> stop_id "0:1117").
 # Codes missing from the static feed are skipped (and shown as missing) until they appear.
-# Every stop gets departures, comparison with UCOP's stop page where it has one, and observed
-# departures (from vehicle positions) for accuracy analysis. UCOP has stop pages but no display
-# image for 586, 585, 148 and 147 (2026-11-07).
+# Every stop gets a published payload, logged predictions and observed departures (from vehicle
+# positions) for accuracy analysis.
 stops = ["1117", "1131", "1054", "372", "132", "175", "168", "118", "136", "113",
          "586", "585", "148", "147"]
 
@@ -47,38 +46,30 @@ block_layover_s = 120
 # Seen 2026-11-06: a real bus went 7.7 min without reporting then came back; ghosts were silent
 # for 34 min to 4.8 h.
 stale_vehicle_s = 900
-# Rows on the board / in the JSON payload
-board_rows = 8
 # Rows in the JSON payload. More than the board shows, so a board that fetches every few minutes
 # and counts down on its own clock still has rows left as buses leave.
 payload_rows = 12
 
-[ucop]
-base_url = "https://transit.ucop.me"
-display_name = "gdem075t41wt"
-# One page fetch per stop per interval (UCOP's image is only fetched when a comparison page is viewed)
-compare_interval_s = 120
-# UCOP truncates times to the minute (up to 59 s) and fetches the feed at different moments
-# from us (seen ±99 s on otherwise identical predictions)
-match_tolerance_s = 120
-# Comparison rows in data/compare.db (~40 rows per stop per snapshot)
-retention_days = 14
-
 [logging]
-# Inputs of every comparison (realtime feeds + UCOP pages, gzipped, ~100 MB/day for 14 stops),
-# so `python -m busboard.replay` can re-run them through changed code. Every static feed
-# version is kept too (~2 MB each).
-archive_days = 7
-static_versions_kept = 30
+# Every log_interval_s: the raw realtime feeds go into data/archive/ (gzipped, ~20 MB/day), so
+# `python -m busboard.accuracy` can replay them through changed code, and the predictions served
+# for each stop (up to log_ahead_s ahead) go into data/busboard.db with the observed departures.
+log_interval_s = 120
+log_ahead_s = 3600
+# Days of predictions and observed departures in busboard.db
+retention_days = 30
+# Days of archived realtime feeds; every static feed version is kept too (~2 MB each)
+archive_days = 30
+static_versions_kept = 60
 
 [publish]
-# Push each stop's JSON payload to a web host over SSH/rsync, for the boards to fetch.
+# Push each stop's JSON payload to a web host over SSH/rsync after every realtime poll,
+# for the boards to fetch.
 # See README.md, "Publishing for the boards", for the DreamHost setup.
 enabled = false
 # rsync destination; the path must end in /v1. e.g. "busboard_pub@<ssh host>:board.devinmalanaphy.com/v1"
 target = ""
 public_url = "https://board.devinmalanaphy.com/v1"
-interval_s = 30
 ssh_key = "~/.ssh/busboard_publish"
 # How often to fetch the published index.json back, to check what the boards would actually get
 verify_interval_s = 600

@@ -79,3 +79,63 @@ def test_payload_rows_and_stale_realtime(tmp_path, monkeypatch, index):
     p = app._payload("1117", now)
     assert p["live"] is False
     assert all(d["src"] == 0 and d["t"] == d["s"] for d in p["deps"])
+
+
+def test_payload_shape():
+    from busboard.departures import Departure
+    from busboard.payload import build_payload
+    from conftest import TZ
+
+    now = local(2026, 11, 6, 18, 0)
+    deps = [Departure("20261106", f"T{i}", "0:1117", 2, "4", "4", "", "Pulse", False, now + 300 * i, now + 300 * i,
+                      i % 3, None, None, False, False, False) for i in (1, 2)]
+    p = build_payload("1117", "Congress St + Center St", deps, now, TZ)
+    assert p["v"] == 1 and p["now"] == now and len(p["deps"]) == 2
+    assert p["tz"] == -5 * 3600 and p["live"] is True  # EST in November
+    assert set(p["deps"][0]) == {"r", "h", "t", "s", "src"}
+
+
+def test_cycle_publishes_logs_and_shows_on_the_dashboard(tmp_path, monkeypatch, index):
+    from fastapi.testclient import TestClient
+
+    app = load_app(tmp_path, monkeypatch)
+    site = tmp_path / "site" / "v1"
+    site.parent.mkdir()
+    app.publisher.target = str(site)  # a local rsync target
+    monkeypatch.setattr(app, "PUBLISHING", True)
+    app.static.index = index
+    now = local(2026, 11, 6, 17, 55)
+    monkeypatch.setattr(app.time, "time", lambda: now)
+    _, trips = parse_trip_updates(trip_updates({"T_STOP": {2: local(2026, 11, 6, 18, 9)}}))
+    monkeypatch.setattr(app.realtime, "refresh",
+                        lambda: setattr(app.realtime, "snapshot",
+                                        RealtimeSnapshot(trips=trips, trip_updates_fetched_at=now - 5,
+                                                         trip_updates_raw=b"tu", vehicle_positions_raw=b"vp")))
+
+    app._cycle()
+    assert app.cycle_status["error"] is None
+    published = json.loads((site / "stops" / "1117.json").read_text())
+    assert published == app._payloads["1117"] and published["deps"][0]["t"] == local(2026, 11, 6, 18, 9)
+    assert app.store.counts_since(0)["1117"]["predictions"] >= 1
+    assert app.archive.last_saved == now and app.cycle_status["logged_rows"] >= 1
+
+    # Next poll: published again, not logged again until log_interval_s has passed
+    monkeypatch.setattr(app.time, "time", lambda: now + 30)
+    app._cycle()
+    assert app.archive.last_saved == now and json.loads((site / "index.json").read_text())["now"] == now + 30
+
+    client = TestClient(app.app)  # without the lifespan: no background tasks
+    assert client.get("/stops/1117/departures").json() == app._payloads["1117"]
+    assert client.get("/stops/1117/departures?debug=1").json()["departures"][0]["trip_id"] == "T_STOP"
+    page = client.get("/")
+    assert page.status_code == 200 and "1117" in page.text and "Congress St + Center St" in page.text
+    assert client.get("/health").json()["publish"]["pushes"] == 2
+
+
+def test_dashboard_before_anything_loaded(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    app = load_app(tmp_path, monkeypatch)
+    app.static.index = None
+    page = TestClient(app.app).get("/")
+    assert page.status_code == 200 and "Needs attention" in page.text and "static schedule" in page.text

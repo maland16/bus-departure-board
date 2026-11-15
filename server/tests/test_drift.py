@@ -85,6 +85,6 @@ def test_early_correction_respects_timepoints_and_window(index):
 def test_warm_start_from_stored_rows(index):
     m = DriftModel(shrink_departures=0)
     rows = [{"ts": T0 + 1800 - lead, "service_date": "20261106", "trip_id": "T_STOP", "stop_code": "1117",
-             "stop_sequence": 2, "our_src": 2, "raw_est": T0 + 1800, "actual": T0 + 1980} for lead in (1800, 1200, 600)]
+             "stop_sequence": 2, "src": 2, "raw_est": T0 + 1800, "actual": T0 + 1980} for lead in (1800, 1200, 600)]
     assert m.warm_start(index, rows) == 3
     assert m.offset(m.key_of(index, "T_STOP", "0:1117"), T0 + 1980)[0] > 0

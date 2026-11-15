@@ -70,7 +70,7 @@ class Departure:
     vehicle_age_s: int | None
     stale_vehicle: bool
     # Another trip on the same block has a stale vehicle: this trip's prediction may be
-    # inherited from it. Flag only, to measure against UCOP before deciding what to do.
+    # inherited from it. Flag only (logged), not acted on.
     stale_block: bool
     canceled: bool
     # Debugging: how many stop updates the trip had in the realtime feed (None = trip not in feed),

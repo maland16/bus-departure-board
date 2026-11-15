@@ -1,7 +1,7 @@
 # systemd *user* unit (busbox has linger enabled, so it runs without anyone logged in).
 # Installed by deploy.sh to ~/.config/systemd/user/busboard.service
 [Unit]
-Description=Bus departure board server (GTFS -> departures JSON/BMP, UCOP comparison)
+Description=Bus departure board server (GTFS -> published departures JSON, prediction logs)
 After=network-online.target
 Wants=network-online.target
 

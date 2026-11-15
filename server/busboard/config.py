@@ -24,30 +24,28 @@ class Config:
     block_layover_s: int | None
     drift_correction: bool
     drift_window_s: int
-    board_rows: int
     payload_rows: int
-    ucop_base_url: str
-    ucop_display_name: str
-    compare_interval_s: int
-    match_tolerance_s: int
+    log_interval_s: int
+    log_ahead_s: int
     retention_days: int
     archive_days: int
     static_versions_kept: int
     publish_enabled: bool
     publish_target: str
     publish_public_url: str
-    publish_interval_s: int
     publish_ssh_key: Path
     publish_verify_interval_s: int
 
 
 def load_config(path: Path | None = None) -> Config:
+    """Unknown keys and sections (e.g. the old [ucop] and [minimap]) are ignored."""
     path = Path(path or os.environ.get("BUSBOARD_CONFIG", DEFAULT_CONFIG))
     if not path.exists() and path == DEFAULT_CONFIG:
         raise FileNotFoundError(f"{path} not found. Start from the template: cp {EXAMPLE_CONFIG.name} {path.name}")
     raw = tomllib.loads(path.read_text())
-    feeds, deps, ucop = raw["feeds"], raw["departures"], raw["ucop"]
-    pub = raw.get("publish", {})
+    feeds, deps = raw["feeds"], raw["departures"]
+    logs, pub = raw.get("logging", {}), raw.get("publish", {})
+    old_ucop = raw.get("ucop", {})  # settings that lived there before the UCOP comparison was removed
     data_dir = Path(raw.get("data_dir", "data"))
     if not data_dir.is_absolute():
         data_dir = path.parent / data_dir
@@ -67,19 +65,15 @@ def load_config(path: Path | None = None) -> Config:
         block_layover_s=deps.get("block_layover_s", 0) if deps.get("block_propagation", False) else None,
         drift_correction=bool(deps.get("drift_correction", False)),
         drift_window_s=int(deps.get("drift_window_s", 3 * 3600)),
-        board_rows=deps["board_rows"],
-        payload_rows=deps.get("payload_rows", deps["board_rows"]),
-        ucop_base_url=ucop["base_url"].rstrip("/"),
-        ucop_display_name=ucop["display_name"],
-        compare_interval_s=ucop["compare_interval_s"],
-        match_tolerance_s=ucop["match_tolerance_s"],
-        retention_days=ucop["retention_days"],
-        archive_days=raw.get("logging", {}).get("archive_days", 7),
-        static_versions_kept=raw.get("logging", {}).get("static_versions_kept", 30),
+        payload_rows=int(deps.get("payload_rows", deps.get("board_rows", 12))),
+        log_interval_s=int(logs.get("log_interval_s", old_ucop.get("compare_interval_s", 120))),
+        log_ahead_s=int(logs.get("log_ahead_s", 3600)),
+        retention_days=int(logs.get("retention_days", old_ucop.get("retention_days", 30))),
+        archive_days=int(logs.get("archive_days", 30)),
+        static_versions_kept=int(logs.get("static_versions_kept", 60)),
         publish_enabled=bool(pub.get("enabled", False)),
         publish_target=str(pub.get("target", "")).strip(),
         publish_public_url=str(pub.get("public_url", "")).rstrip("/"),
-        publish_interval_s=int(pub.get("interval_s", 30)),
         publish_ssh_key=Path(str(pub.get("ssh_key", "~/.ssh/busboard_publish"))).expanduser(),
         publish_verify_interval_s=int(pub.get("verify_interval_s", 600)),
     )

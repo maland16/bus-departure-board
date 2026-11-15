@@ -1,7 +1,6 @@
 """Working out when buses actually left the watched stops, from successive VehiclePosition reports.
 
-This is the ground truth for judging predictions (ours and UCOP's), and it works for any stop,
-whether or not UCOP covers it.
+This is the ground truth for judging predictions and for the drift correction, for any stop.
 
 GP Metro's vehicles report the stop they are at (STOPPED_AT) or heading to (IN_TRANSIT_TO).
 Either way, every stop earlier in the trip has been left behind. So a watched stop at sequence s

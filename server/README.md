@@ -1,16 +1,17 @@
 # Departure board server
 
-Builds the departure list for a stop directly from GP Metro's GTFS feeds, so the board won't need UCOP's
-rendered bitmap. For now it runs next to UCOP and compares the two, for the stops listed in `config.toml`. It also
-watches vehicle positions to see when buses actually leave each stop, so predictions (ours and UCOP's) can be scored
-against reality. That works for any stop, whether or not UCOP covers it.
+Builds each stop's list of upcoming departures from GP Metro's GTFS feeds and publishes it as a small JSON file
+for the e-ink boards. It also watches vehicle positions to see when buses actually leave each stop, and logs its
+predictions next to those departures, so the estimates can keep being improved.
 
-- `GET /compare` (also `/`): one row per stop with its 24-hour agreement with UCOP and accuracy against actual departures.
-- `GET /stops/1117/departures`: the small JSON the boards fetch (~0.6 KB instead of a 48 KB BMP), via the published copy (see below).
-  Add `?debug=1` for every field.
-- `GET /stops/1117/display.bmp`: our own 800x480 1-bit BMP, in the format the current firmware already accepts.
-- `GET /compare/1117`: our image next to UCOP's, the latest trip-by-trip comparison, and a 24-hour summary.
-- `GET /health`: feed ages, static feed version, and how many realtime trips match the static feed.
+- `GET /`: status dashboard: is publishing working, are the feeds fresh, is logging keeping up, per-stop departures,
+  accuracy and drift correction, and recent events.
+- `GET /stops/1117/departures`: the payload as last published (the boards fetch the published copy, see below).
+  Add `?debug=1` for every computed field.
+- `GET /health`: the same status as JSON (503 if the schedule isn't loaded or TripUpdates are over 5 min old).
+
+Every 30 s the server fetches the realtime feeds, computes every stop's departures once, and pushes the payloads to
+the web host. Every 2 min it also logs the predictions and archives the raw feeds.
 
 ## How departures are worked out
 
@@ -39,7 +40,7 @@ For each scheduled visit to the stop, the first rule that applies:
   shifts predictions by it, scaled down until a few departures have been seen, capped at 5 minutes and faded out in the
   last 3 minutes before a departure, where the feed is already good. Feed glitches (errors over 10 min) and vaguely
   known departures aren't learned from. It never moves a departure before its scheduled time at a timepoint. Learned
-  state is rebuilt from `compare.db` on restart; `/health` shows the largest corrections.
+  state is rebuilt from `busboard.db` on restart; the dashboard and `/health` show the corrections.
 - Optional, off by default (`block_propagation`): a trip can't start before its bus finishes the previous trip on the
   same block. Re-measure with `busboard.accuracy` before turning it on.
 - Departures more than 60 s in the past are dropped.
@@ -47,41 +48,18 @@ For each scheduled visit to the stop, the first rule that applies:
 GP Metro's feeds: the static zip is rebuilt nightly with a rolling ~30-day `calendar_dates.txt`. Realtime predictions
 are absolute times. About a quarter of trips have no headsign, so the trip's last stop name is used instead.
 
-## Comparing with UCOP
-
-Every 2 minutes the server fetches UCOP's page for each stop. UCOP's image is fetched only when a comparison page is
-viewed. Departures are matched on the GTFS trip ID in UCOP's `data-key` attribute and stored in `data/compare.db`
-(SQLite, 14 days). Categories:
-
-- `match`: both list the trip, with times within 90 s. UCOP shows times truncated to the minute.
-- `time_diff`: both list it, but the times differ. Flags: `stale_vehicle` (we deliberately ignored a ghost bus's
-  prediction) and `stale_block` (another trip on the same block has a ghost bus).
-- `ours_only` / `ucop_only`: only one side lists it, within the time window both lists cover.
-- `ucop_departed`: UCOP keeps departed buses listed and we don't. Not counted.
-- `ours_terminating`: a trip ending at this stop that only we list. UCOP caps its lists at 40 entries and leaves many
-  of these out at hubs, and our board doesn't show them. Not counted.
-- `drift_correction` (a `diff_reason`): our drift correction moved the time, and the uncorrected prediction matched
-  UCOP. Expected, since UCOP doesn't correct.
-- `no_ucop`: UCOP's page couldn't be fetched. Our departures are still logged for accuracy scoring. Not counted.
-
-Each `time_diff` also gets a `diff_reason`. `stale_vehicle`, `stale_block`, `held_at_timepoint` and
-`gone_from_feed` are cases where UCOP shows something stale or impossible. Anything left over (`src2`, `src1`,
-`src0`) is worth investigating.
-
-UCOP has stop pages but no display image for 586, 585, 148 and 147. The comparison works the same; the stop page
-just shows a note in place of UCOP's image.
-
 ## Accuracy against actual departures
 
 Each realtime poll (every 30 s), the server tracks every bus on a trip that serves a watched stop. GP Metro's vehicles
 report the stop they're at or heading to, so a stop is departed once the bus reports a later one. Each departure goes
-into `observed_departures` in `compare.db`, with the window it happened in (`departed_after`, `departed_by`). The
-comparison pages score predictions made 0-5, 5-20 and 20-60 minutes before each departure.
+into `observed_departures` in `busboard.db`, with the window it happened in (`departed_after`, `departed_by`). The
+dashboard shows each stop's mean absolute error for predictions made 5-20 minutes ahead over the last 24 hours.
 
-To test a change to the GTFS handling against real outcomes, replay the archive through it:
+To test a change to the estimates against real outcomes, replay the archive through it:
 
 ```sh
-uv run python -m busboard.accuracy data-pi                     # by minutes before departure, ours vs UCOP
+rsync -a busbox@192.168.1.27:busboard/data/ data-pi/        # data-pi/ is gitignored
+uv run python -m busboard.accuracy data-pi                     # by minutes before departure
 uv run python -m busboard.accuracy data-pi --by src            # or --by stop / route
 uv run python -m busboard.accuracy data-pi --config trial.toml # e.g. with block_propagation = true
 uv run python -m busboard.accuracy data-pi --rows acc.jsonl    # every scored prediction
@@ -89,44 +67,37 @@ uv run python -m busboard.accuracy data-pi --rows acc.jsonl    # every scored pr
 
 Actual departures come from the live observations where available (30 s resolution). Otherwise they're worked out
 from the archived vehicle positions (2 min resolution). Stops added to the config later can be scored on older
-archives too, since our predictions only need the realtime feeds.
+archives too, since predictions only need the realtime feeds.
 
-## Logs for debugging the GTFS handling
+## Logs
 
 Everything is under `data/` on the Pi (`~/busboard/data`):
 
 | Path | What | Kept |
 | - | - | - |
-| `compare.db` `observed_departures` | When buses actually left each watched stop | 14 days |
-| `compare.db` `rows` | Every comparison row, with debug columns: `our_src`, `stop_sequence`, `timepoint`, `vehicle_id`, `vehicle_age_s`, `rt_updates` (stop updates the trip had in the feed), `origin_delay_s`, UCOP's status text, and the `archive` directory of the inputs | 14 days |
-| `archive/YYYYMMDD/HHMMSS/` | The exact inputs of each comparison: both realtime feeds and every stop's UCOP page (gzipped, ~136 KB for 14 stops, ~100 MB/day) | 7 days |
-| `archive/static/` | Every static feed version seen | 30 versions |
-| `logs/events-YYYYMMDD.jsonl` | Static rebuilds (incl. how many trip IDs survived from the previous version), feed errors and recoveries, trip-ID match dips (with a sample of unmatched IDs), UCOP errors | 14 days |
+| `busboard.db` `predictions` | Every 2 min, each stop's departures up to 60 min ahead, as served (`est` includes the drift correction, `drift_s` says how much), with `shown` (in the payload) and debug columns: `src`, `stop_sequence`, `vehicle_id`, `vehicle_age_s`, `rt_updates`, `origin_delay_s`, `ref_stop_sequence`, `timepoint_wait_s`, `held_at_timepoint`, `from_vehicle`, `stale_vehicle` | 30 days |
+| `busboard.db` `observed_departures` | When buses actually left each watched stop | 30 days |
+| `archive/YYYYMMDD/HHMMSS/` | Both realtime feeds every 2 min (gzipped, ~15 MB/day), for replaying | 30 days |
+| `archive/static/` | Every static feed version seen | 60 versions |
+| `logs/events-YYYYMMDD.jsonl` | Startup, static rebuilds (incl. how many trip IDs survived), feed and publish errors and recoveries, trip-ID match dips (with a sample of unmatched IDs) | 30 days |
 
-The usual loop: pull the data, find a pattern of disagreements, change the code, and **replay** the archived inputs
-through the changed code to check that agreement improved before deploying:
+`busboard.db` was `compare.db` until the UCOP comparison was removed (2026-11). On first start the server renames it,
+keeps our side of the comparison rows as `predictions` and drops the rest.
 
-```sh
-rsync -a busbox@192.168.1.27:busboard/data/ data-pi/        # data-pi/ is gitignored
-uv run python -m busboard.replay data-pi                    # per-stop summary using the current code
-uv run python -m busboard.replay data-pi --stop 372 --since 20261107-0600 --mismatches
-uv run python -m busboard.replay data-pi --rows rows.jsonl  # every row as JSON lines, for jq / pandas
-```
-
-Example queries on `compare.db`:
+Live accuracy, straight from the database (no replay needed):
 
 ```sql
--- Disagreements by stop and our source, excluding the deliberate ghost-bus ones
-SELECT stop_code, our_src, COUNT(*), AVG(diff_s) FROM rows
-WHERE category = 'time_diff' AND NOT stale_vehicle GROUP BY 1, 2;
--- Predictions earlier than the schedule at timepoints (buses usually wait there)
-SELECT stop_code, route, trip_id, (our_est - our_sched) AS early_s, ucop_status_text FROM rows
-WHERE timepoint AND our_est < our_sched - 60 AND category IN ('match', 'time_diff');
+-- Mean absolute error by minutes ahead, last 7 days
+SELECT (a - p.ts) / 300 * 5 AS min_ahead, COUNT(*), AVG(ABS(p.est - a)) / 60.0 AS mae_min
+FROM predictions p JOIN (SELECT *, (departed_after + departed_by) / 2 AS a FROM observed_departures
+                         WHERE departed_after IS NOT NULL AND departed_by - departed_after <= 180) o
+  USING (service_date, trip_id, stop_code, stop_sequence)
+WHERE p.ts > strftime('%s', 'now') - 7 * 86400 AND a > p.ts GROUP BY 1 ORDER BY 1;
 ```
 
 ## Publishing for the boards
 
-The boards fetch a small JSON file per stop from a static web host, instead of UCOP's 48 KB bitmap. Every 30 s
+The boards fetch a small JSON file per stop from a static web host. After every realtime poll (30 s)
 the Pi writes the files into `data/publish/v1/` and pushes them with rsync over SSH. The connection is outbound only,
 so nothing is opened on the home network. If the Pi or the home internet goes down, the files stop updating; the
 boards will see an old `now`: they keep counting down from the last departures they have, and show a "Live tracking unavailable" screen once those are 30 minutes old.
@@ -177,8 +148,8 @@ host, and the target must end in `/v1`.
 
 ### Checking it
 
-- `/health` has a `publish` section: last successful push, its duration, and how old the data was when the host
-  served it back (`served_lag_s`, checked every 10 min).
+- The dashboard (and `/health`'s `publish` section) shows the last successful push, its duration, and how old the
+  data was when the host served it back (`served_lag_s`, checked every 10 min).
 - Events: `publish_error` / `publish_recovered` when pushes start or stop failing, `publish_served_stale` if the host
   serves data over 2 min old (caching, or pushes landing in the wrong directory).
 - `curl -sI https://board.devinmalanaphy.com/v1/stops/1117.json` should show `content-type: application/json` and
