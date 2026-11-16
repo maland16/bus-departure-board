@@ -6,9 +6,9 @@ The goal of this project is to create a relatively low cost standalone live depa
 ```mermaid
 graph TD;
 
-    A[GPMetro GTFS Feed] --> B["UCOP transit server parses GTFS and makes pretty image"];
+    A[GPMetro GTFS Feed] --> B["Local raspberry pi server parses GTFS and posts JSON to web server"];
     
-    B -->|Bitmap image of recent & upcoming departures|C[ESP-32 Based display at bus stop];
+    B -->|JSON with upcoming departure data|C[ESP-32 Based display at bus stop];
 
     D["InfluxDB viewable via Grafana"] ---|"Telemetry Data (Batt/Solar voltage, temp, status, etc.)"|C;
 ```
